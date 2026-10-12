@@ -56,3 +56,5 @@ logs/
 
 # Stage 9 scratch (throwaway probe scripts, not evidence)
 .s9_tmp/
+
+.vite/
