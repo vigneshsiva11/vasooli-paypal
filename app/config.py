@@ -42,6 +42,13 @@ class Settings(BaseSettings):
     razorpay_key_secret: str = ""
     razorpay_webhook_secret: str = ""
 
+    # PayPal (sandbox) — Phase 2 / PayPal AI Hackathon
+    paypal_env: str = "sandbox"
+    paypal_client_id: str = ""
+    paypal_client_secret: str = ""
+    paypal_webhook_id: str = ""
+    paypal_buyer_email: str = ""
+
 
 @lru_cache
 def get_settings() -> Settings:

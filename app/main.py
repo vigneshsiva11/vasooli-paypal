@@ -31,6 +31,7 @@ from app.routes import (
     events,
     executions,
     metrics,
+    paypal_webhooks,
     policy,
     promises,
     webhooks,
@@ -108,6 +109,8 @@ app.include_router(executions.router)
 # so that signature rejection is unconditional — see `app/routes/webhooks.py`.
 app.include_router(webhooks.webhook_router)
 app.include_router(webhooks.router)
+# PayPal webhook receiver — Phase 2. Same no-database-ready pattern.
+app.include_router(paypal_webhooks.paypal_webhook_router)
 app.include_router(promises.router)
 # Stage 7. Read-only: this router declares GET routes and nothing else, and calls
 # no index-ensuring function above because it creates no collection of its own.

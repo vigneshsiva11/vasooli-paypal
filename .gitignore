@@ -58,3 +58,6 @@ logs/
 .s9_tmp/
 
 .vite/
+
+# PayPal spike raw responses (may contain sandbox PII — never commit)
+docs/spike/raw/
