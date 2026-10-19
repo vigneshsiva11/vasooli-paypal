@@ -218,6 +218,22 @@ class ExecutionRecord(BaseModel):
         ...,
         description="The shape of what was done. Derived from `intervention`.",
     )
+    gateway: Literal["razorpay", "paypal"] = Field(
+        default="razorpay",
+        description="Payment gateway used for execution.",
+    )
+    gateway_ref: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=64,
+        description="Generic gateway reference (e.g. order_id, invoice_id, or payment_link_id).",
+    )
+    gateway_url: (
+        Annotated[str, StringConstraints(pattern=r"^https://", max_length=500)] | None
+    ) = Field(
+        default=None,
+        description="Generic gateway actionable URL (e.g. PayPal checkout/invoice URL or Razorpay link URL).",
+    )
     razorpay_payment_link_id: str | None = Field(
         default=None,
         min_length=1,
@@ -346,14 +362,31 @@ class ExecutionRecord(BaseModel):
         )
 
         if wants_link:
-            missing = sorted(name for name, value in link_fields.items() if not value)
-            if missing:
-                raise ValueError(
-                    f"a completed {self.action_type!r} must record {missing}; "
-                    "without them there is no artifact to verify later"
-                )
+            if self.gateway == "paypal":
+                paypal_link_fields = {
+                    "gateway_ref": self.gateway_ref,
+                    "gateway_url": self.gateway_url,
+                }
+                missing = sorted(name for name, value in paypal_link_fields.items() if not value)
+                if missing:
+                    raise ValueError(
+                        f"a completed PayPal {self.action_type!r} must record {missing}; "
+                        "without them there is no artifact to verify later"
+                    )
+            else:
+                missing = sorted(name for name, value in link_fields.items() if not value)
+                if missing:
+                    raise ValueError(
+                        f"a completed {self.action_type!r} must record {missing}; "
+                        "without them there is no artifact to verify later"
+                    )
         else:
             present = sorted(name for name, value in link_fields.items() if value)
+            if self.gateway_ref:
+                present.append("gateway_ref")
+            if self.gateway_url:
+                present.append("gateway_url")
+            present.sort()
             if present:
                 raise ValueError(
                     f"{present} set on a {self.status} {self.action_type!r}, which "

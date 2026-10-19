@@ -49,6 +49,8 @@ PolicyReason = Literal[
     "cooldown_active",
     # Economics.
     "erv_below_minimum",
+    # Currency unsupported — fail-closed to manual review.
+    "unsupported_currency",
     # Autonomy ceiling — routing to a human, not a refusal.
     "amount_never_auto",
     "amount_requires_approval",
@@ -66,6 +68,7 @@ REASON_VERDICT: dict[str, str] = {
     "contact_cap_exceeded": "blocked",
     "cooldown_active": "blocked",
     "erv_below_minimum": "blocked",
+    "unsupported_currency": "requires_manual_review",
     "amount_never_auto": "requires_manual_review",
     "amount_requires_approval": "requires_manual_review",
 }
@@ -85,6 +88,7 @@ REASON_PRECEDENCE: tuple[str, ...] = (
     "contact_cap_exceeded",
     "cooldown_active",
     "erv_below_minimum",
+    "unsupported_currency",
     "amount_never_auto",
     "amount_requires_approval",
 )
@@ -117,6 +121,7 @@ CHECK_FOR_REASON: dict[str, str] = {
     "contact_cap_exceeded": "contact_cap",
     "cooldown_active": "contact_cooldown",
     "erv_below_minimum": "erv_minimum",
+    "unsupported_currency": "amount_tier",
     "amount_never_auto": "amount_tier",
     "amount_requires_approval": "amount_tier",
 }
@@ -381,9 +386,9 @@ class PolicyVerdict(BaseModel):
             for reason, check in CHECK_FOR_REASON.items()
             if check in failed_checks
         }
-        # `amount_tier` maps to two reasons; only the one actually reported can
+        # `amount_tier` maps to multiple reasons; only the one actually reported can
         # be assumed to have applied, so drop the other from the comparison.
-        for reason in ("amount_never_auto", "amount_requires_approval"):
+        for reason in ("amount_never_auto", "amount_requires_approval", "unsupported_currency"):
             if reason != self.reason:
                 failed_reasons.discard(reason)
 

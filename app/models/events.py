@@ -143,6 +143,14 @@ class RevenueEvent(BaseModel):
         min_length=1,
         description="Merchant-side reference for the customer who owes the money.",
     )
+    gateway: Literal["razorpay", "paypal"] = Field(
+        default="razorpay",
+        description="Payment gateway origin for the event.",
+    )
+    gateway_ref: Optional[str] = Field(
+        default=None,
+        description="Gateway's native reference for this charge or order, e.g. order_id or capture_id.",
+    )
     created_at: datetime = Field(
         default_factory=_utc_now,
         description="When the event entered the system (UTC).",

@@ -175,6 +175,12 @@ def classify(event: RevenueEvent, prior_event_count: int = 0) -> RuleMatch | Non
     return None
 
 
+HIGH_VALUE_THRESHOLDS: dict[str, float] = {
+    "INR": 50_000.0,
+    "USD": 600.0,
+}
+
+
 def _history_evidence(event: RevenueEvent, prior_event_count: int) -> tuple[str, ...]:
     """Build supporting evidence from history and amount, if either is notable."""
     evidence: list[str] = []
@@ -186,7 +192,8 @@ def _history_evidence(event: RevenueEvent, prior_event_count: int) -> tuple[str,
             f"{prior_event_count} earlier at-risk events for this customer"
         )
 
-    if event.amount >= 50_000:
+    threshold = HIGH_VALUE_THRESHOLDS.get(event.currency.upper(), 50_000.0)
+    if event.amount >= threshold:
         evidence.append(f"high-value event ({event.currency} {event.amount:,.2f})")
 
     return tuple(evidence)

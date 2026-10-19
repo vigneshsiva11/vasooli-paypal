@@ -299,6 +299,16 @@ def _check_erv_minimum(decision: DecisionRecord, rulebook: Rulebook) -> CheckOut
     there is no downside to weigh, so declining a small positive expectation would
     simply forgo free money.
     """
+    if rulebook.tier_currency not in ("INR", "USD"):
+        return CheckOutcome(
+            name="erv_minimum",
+            passed=True,
+            detail=(
+                f"currency {rulebook.tier_currency!r} has no ratified ERV floor; "
+                "deferred to manual review"
+            ),
+        )
+
     erv = decision.expected_recovery_value
     cost = decision.estimated_cost
     floor = rulebook.minimum_erv
@@ -341,6 +351,17 @@ def _check_amount_tier(decision: DecisionRecord, rulebook: Rulebook) -> CheckOut
     wrong with the recommendation; it is simply larger than the agent is trusted
     to commit alone.
     """
+    if rulebook.tier_currency not in ("INR", "USD"):
+        return CheckOutcome(
+            name="amount_tier",
+            passed=False,
+            detail=(
+                f"currency {rulebook.tier_currency!r} is unsupported; failing "
+                "closed to manual review"
+            ),
+            reason="unsupported_currency",
+        )
+
     amount = decision.revenue_at_risk
     tier = rulebook.tier_for(amount)
     ceiling = rulebook.never_auto_at_or_above
@@ -391,7 +412,7 @@ def assert_applicable(rulebook: Rulebook) -> None:
         UnreproducibleRulebook: if the rulebook disagrees with this build on any
             of `MODEL_ENFORCED_FIELDS`.
     """
-    live = current_rulebook()
+    live = current_rulebook(rulebook.tier_currency)
     blocking = [
         name
         for name in MODEL_ENFORCED_FIELDS
@@ -412,13 +433,14 @@ def run_checks(
     decision: DecisionRecord,
     context: PolicyContext,
     rulebook: Rulebook | None = None,
+    currency: str | None = None,
 ) -> list[CheckOutcome]:
     """Evaluate every policy check, in trail order.
 
     All of them, always. This function contains no early return, which is why the
     trail cannot come back partial.
     """
-    book = current_rulebook() if rulebook is None else rulebook
+    book = current_rulebook(currency or "INR") if rulebook is None else rulebook
 
     outcomes = [
         _check_actionable(decision, book),
@@ -443,6 +465,7 @@ def evaluate(
     decision: DecisionRecord,
     context: PolicyContext,
     rulebook: Rulebook | None = None,
+    currency: str | None = None,
 ) -> PolicyVerdict:
     """Decide whether one specific recommendation is permitted.
 
@@ -456,8 +479,10 @@ def evaluate(
         rulebook: The parameters to judge against. Defaults to the rulebook in
             force. Pass a superseded one to replay a historical verdict under the
             policy that actually produced it.
+        currency: The currency of the event (default "INR"). Used to select the
+            live rulebook profile if `rulebook` is not provided.
     """
-    book = current_rulebook() if rulebook is None else rulebook
+    book = current_rulebook(currency or "INR") if rulebook is None else rulebook
     assert_applicable(book)
 
     outcomes = run_checks(decision=decision, context=context, rulebook=book)

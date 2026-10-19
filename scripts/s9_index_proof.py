@@ -34,11 +34,13 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+from pathlib import Path
 
-from dotenv import load_dotenv
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+
 from motor.motor_asyncio import AsyncIOMotorClient
-
-load_dotenv("D:/vasooli/.env")
+from app.config import get_settings
 
 COLLECTION = "verifications"
 EVENT_ID_INDEX = "uniq_razorpay_event_id"
@@ -78,10 +80,9 @@ async def ids_matching(collection, query: dict) -> set[str]:
 
 
 async def main() -> int:
-    uri = os.environ["MONGODB_URI"]
-    database_name = os.environ.get("MONGODB_DB_NAME", "vasooli")
-    client = AsyncIOMotorClient(uri)
-    verifications = client[database_name][COLLECTION]
+    settings = get_settings()
+    client = AsyncIOMotorClient(settings.mongodb_uri)
+    verifications = client[settings.mongodb_db_name][COLLECTION]
 
     print("=" * 78)
     print("STAGE 9 / CHECKPOINT 1 — verification index migration")

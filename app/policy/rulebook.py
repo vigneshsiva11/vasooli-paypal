@@ -123,6 +123,10 @@ class Rulebook:
     #: in a way a digest can rely on.
     reason_verdict: tuple[tuple[str, str], ...]
 
+    # -- Currency profile extensions (optional; omitted from digest when None)
+    fx_rate_inr_per_usd: float | None = field(default=None)
+    intervention_costs: tuple[tuple[str, float], ...] | None = field(default=None)
+
     #: Human note on what this rulebook was and when. Documentation only —
     #: excluded from the fingerprint, so rewording an archive entry cannot change
     #: the identity of the rulebook it describes.
@@ -264,6 +268,8 @@ def canonical_form(rulebook: Rulebook) -> str:
     payload: dict[str, object] = {}
     for name in HASHED_FIELDS:
         value = getattr(rulebook, name)
+        if value is None:
+            continue
         declared = _declared_type(name)
         if isinstance(value, frozenset | set):
             payload[name] = sorted(value)

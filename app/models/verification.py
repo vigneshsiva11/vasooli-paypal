@@ -137,6 +137,13 @@ ALLOWED_SOURCES: frozenset[str] = frozenset(get_args(VerificationSource))
 
 assert {WEBHOOK_SOURCE, MANUAL_SOURCE} == ALLOWED_SOURCES
 
+#: How the outcome was verified: attested by a payment gateway or asserted by merchant.
+AssertionType = Literal["gateway_verified", "merchant_asserted"]
+GATEWAY_VERIFIED: AssertionType = "gateway_verified"
+MERCHANT_ASSERTED: AssertionType = "merchant_asserted"
+ALLOWED_ASSERTIONS: frozenset[str] = frozenset(get_args(AssertionType))
+assert {GATEWAY_VERIFIED, MERCHANT_ASSERTED} == ALLOWED_ASSERTIONS
+
 #: Prefix of the manual idempotency key. Namespaced so a `confirmation_id` can
 #: never be mistaken for a Razorpay identifier by a human reading the collection.
 MANUAL_CONFIRMATION_PREFIX = "manual_conf_"
@@ -181,6 +188,18 @@ def source_of(document: Mapping[str, Any]) -> str:
     """
     source = document.get("source")
     return WEBHOOK_SOURCE if source is None else str(source)
+
+
+def assertion_of(document: Mapping[str, Any]) -> str:
+    """Read a stored verification's assertion, defaulting from source for old documents.
+
+    Webhook records default to 'gateway_verified'; manual confirmations default to
+    'merchant_asserted'.
+    """
+    assertion = document.get("assertion")
+    if assertion is not None:
+        return str(assertion)
+    return MERCHANT_ASSERTED if source_of(document) == MANUAL_SOURCE else GATEWAY_VERIFIED
 
 
 def _utc_now() -> datetime:
@@ -283,6 +302,14 @@ class VerificationBase(BaseModel):
             "history by; see `ManualVerification.confirmed_at` for the asserted time."
         ),
     )
+    assertion: AssertionType = Field(
+        default=GATEWAY_VERIFIED,
+        description=(
+            "Whether this recovery was verified by a payment gateway or asserted "
+            "by the merchant. Defaults to 'gateway_verified' for webhook records and "
+            "'merchant_asserted' for manual records."
+        ),
+    )
 
     @model_validator(mode="after")
     def _money_must_match_the_outcome(self) -> "VerificationBase":
@@ -351,8 +378,22 @@ class WebhookVerification(VerificationBase):
             "in `source_of` correct for the records already stored."
         ),
     )
-    razorpay_event_id: str = Field(
-        ...,
+    gateway: Literal["razorpay", "paypal"] = Field(
+        default="razorpay",
+        description="Payment gateway that delivered or verified the webhook.",
+    )
+    gateway_ref: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=100,
+        description="Generic gateway reference (e.g. PayPal capture_id, order_id, or Razorpay payment_link_id).",
+    )
+    assertion: Literal["gateway_verified", "merchant_asserted"] = Field(
+        default=GATEWAY_VERIFIED,
+        description="Always 'gateway_verified' for webhooks.",
+    )
+    razorpay_event_id: str | None = Field(
+        default=None,
         min_length=1,
         max_length=100,
         description=(
@@ -363,12 +404,12 @@ class WebhookVerification(VerificationBase):
             "that index is partial — see `app/webhooks/store.py`."
         ),
     )
-    razorpay_event: RazorpayLinkEvent = Field(
-        ...,
+    razorpay_event: RazorpayLinkEvent | None = Field(
+        default=None,
         description="The event name Razorpay sent. Determines `outcome`.",
     )
-    razorpay_payment_link_id: str = Field(
-        ...,
+    razorpay_payment_link_id: str | None = Field(
+        default=None,
         min_length=1,
         max_length=64,
         description=(
@@ -385,17 +426,18 @@ class WebhookVerification(VerificationBase):
         the event's status would follow it. The outcome is the one field the whole
         stage turns on, so it is the one field with no discretion in it.
         """
-        expected = OUTCOME_FOR_EVENT.get(self.razorpay_event)
-        if expected is None:  # pragma: no cover - the Literal precedes this
-            raise ValueError(
-                f"{self.razorpay_event!r} is not a subscribed event; "
-                "OUTCOME_FOR_EVENT does not say what it would mean"
-            )
-        if self.outcome != expected:
-            raise ValueError(
-                f"{self.razorpay_event!r} means {expected!r}, not {self.outcome!r}; "
-                "the outcome is derived from the event and is not a free choice"
-            )
+        if self.razorpay_event is not None:
+            expected = OUTCOME_FOR_EVENT.get(self.razorpay_event)
+            if expected is None:  # pragma: no cover - the Literal precedes this
+                raise ValueError(
+                    f"{self.razorpay_event!r} is not a subscribed event; "
+                    "OUTCOME_FOR_EVENT does not say what it would mean"
+                )
+            if self.outcome != expected:
+                raise ValueError(
+                    f"{self.razorpay_event!r} means {expected!r}, not {self.outcome!r}; "
+                    "the outcome is derived from the event and is not a free choice"
+                )
         return self
 
 
@@ -433,6 +475,10 @@ class ManualVerification(VerificationBase):
             "A human asserted this. Not verified by any gateway, and reported "
             "separately from webhook recoveries wherever money is totalled."
         ),
+    )
+    assertion: Literal["gateway_verified", "merchant_asserted"] = Field(
+        default=MERCHANT_ASSERTED,
+        description="Always 'merchant_asserted' for manual confirmations.",
     )
     outcome: Literal["recovered"] = Field(
         default=RECOVERED_OUTCOME,
@@ -551,14 +597,17 @@ def verification_document(
 
     Replaces the `VerificationRecordDocument.from_document` classmethod the single
     model had, because a discriminated union is not a class and cannot carry one.
-    The `source` tag is filled in by `source_of`, which is what lets the 42
-    pre-Stage-9 records parse without being rewritten.
+    The `source` tag is filled in by `source_of`, and `assertion` is filled in by
+    `assertion_of`, which is what lets pre-existing records parse without being
+    rewritten.
 
     Raises:
         pydantic.ValidationError: the document does not satisfy either variant.
     """
     fields = {key: value for key, value in document.items() if key != "_id"}
     fields["source"] = source_of(document)
+    if "assertion" not in fields or fields["assertion"] is None:
+        fields["assertion"] = assertion_of(document)
     return _DOCUMENT_ADAPTER.validate_python({"id": str(document["_id"]), **fields})
 
 

@@ -114,6 +114,34 @@ INTERVENTIONS: dict[str, InterventionSpec] = {
     ),
 }
 
+#: Fixed documented exchange rate used for converting intervention costs: 1 USD = 83.00 INR
+FX_RATE_INR_PER_USD: float = 83.0
+
+USD_INTERVENTION_COSTS: dict[str, float] = {
+    "immediate_retry": 0.0,
+    "delayed_retry": 0.0,
+    "payment_method_update_link": 0.06,  # 5.00 INR / 83.0
+    "recovery_payment_link": 0.06,        # 5.00 INR / 83.0
+    "reminder": 0.04,                     # 3.00 INR / 83.0
+    "escalating_reminder_sequence": 0.24, # 20.00 INR / 83.0
+    "manual_escalation": 0.60,            # 50.00 INR / 83.0
+    "no_action": 0.0,
+    "no_action_low_confidence": 0.0,
+    "no_action_negative_erv": 0.0,
+}
+
+INTERVENTIONS_BY_CURRENCY: dict[str, dict[str, InterventionSpec]] = {
+    "INR": INTERVENTIONS,
+    "USD": {
+        name: InterventionSpec(
+            name=spec.name,
+            estimated_cost=USD_INTERVENTION_COSTS[name],
+            summary=spec.summary,
+        )
+        for name, spec in INTERVENTIONS.items()
+    },
+}
+
 
 def _no_action(reason: str) -> tuple[Candidate, ...]:
     """A mapping that attempts nothing. Zero probability, zero cost."""
@@ -437,6 +465,8 @@ def candidates_for(surface: str, root_cause: str) -> tuple[Candidate, ...]:
     return INTERVENTION_MATRIX[(surface, root_cause)]
 
 
-def cost_of(intervention: str) -> float:
-    """Return an intervention's fixed cost."""
-    return INTERVENTIONS[intervention].estimated_cost
+def cost_of(intervention: str, currency: str = "INR") -> float:
+    """Return an intervention's fixed cost in the specified currency."""
+    curr = (currency or "INR").upper()
+    table = INTERVENTIONS_BY_CURRENCY.get(curr, INTERVENTIONS)
+    return table[intervention].estimated_cost

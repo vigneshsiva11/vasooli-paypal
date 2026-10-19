@@ -50,9 +50,9 @@ def _money(value: float) -> str:
     return f"{value:,.{MONEY_PRECISION}f}"
 
 
-def _score(candidate: Candidate, revenue_at_risk: float) -> tuple[Candidate, float, float]:
+def _score(candidate: Candidate, revenue_at_risk: float, currency: str = "INR") -> tuple[Candidate, float, float]:
     """Return a candidate with its cost and ERV."""
-    cost = cost_of(candidate.intervention)
+    cost = cost_of(candidate.intervention, currency=currency)
     erv = expected_recovery_value(
         revenue_at_risk, candidate.recovery_probability, cost
     )
@@ -60,7 +60,7 @@ def _score(candidate: Candidate, revenue_at_risk: float) -> tuple[Candidate, flo
 
 
 def evaluate(
-    surface: str, root_cause: str, revenue_at_risk: float
+    surface: str, root_cause: str, revenue_at_risk: float, currency: str = "INR"
 ) -> list[tuple[Candidate, float, float]]:
     """Score every permitted intervention for a diagnosis, best first.
 
@@ -71,7 +71,7 @@ def evaluate(
     inputs always yield the same recommendation.
     """
     scored = [
-        _score(candidate, revenue_at_risk)
+        _score(candidate, revenue_at_risk, currency=currency)
         for candidate in candidates_for(surface, root_cause)
     ]
     scored.sort(key=lambda item: (-item[2], item[1], item[0].intervention))
@@ -137,19 +137,19 @@ def decide(*, diagnosis: DiagnosisRecord, event: RevenueEvent) -> Decision:
         f"{diagnosis.confidence:.2f}, method {diagnosis.method})."
     )
 
+    currency = event.currency.upper()
     currency_note = ""
-    if event.currency.upper() != COST_CURRENCY:
+    if currency not in ("INR", "USD"):
         currency_note = (
-            f" NOTE: event is denominated in {event.currency.upper()} while "
-            f"intervention costs are in {COST_CURRENCY}; the cost term is not "
+            f" NOTE: event is denominated in {currency} while "
+            f"intervention costs default to {COST_CURRENCY}; the cost term is not "
             "converted, so this ERV understates or overstates cost accordingly."
         )
         logger.warning(
-            "Event %s is in %s but intervention costs are in %s; ERV cost term "
-            "is not FX-converted",
+            "Event %s is in %s but intervention costs are not supported; ERV cost term "
+            "defaults to INR",
             event.event_id,
             event.currency,
-            COST_CURRENCY,
         )
 
     # 1. Hard block: diagnosis says this is not worth recovering at all.
@@ -181,7 +181,7 @@ def decide(*, diagnosis: DiagnosisRecord, event: RevenueEvent) -> Decision:
         )
 
     # 3. Score every permitted option for this exact root cause.
-    scored = evaluate(diagnosis.surface, diagnosis.root_cause, revenue_at_risk)
+    scored = evaluate(diagnosis.surface, diagnosis.root_cause, revenue_at_risk, currency=currency)
     best_candidate, best_cost, best_erv = scored[0]
 
     # The matrix itself may map a cause to no-action — the ratified handling of

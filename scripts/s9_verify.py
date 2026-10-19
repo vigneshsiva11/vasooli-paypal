@@ -35,13 +35,16 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import sys
 import urllib.error
 import urllib.request
+from pathlib import Path
 
-from dotenv import load_dotenv
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+
 from motor.motor_asyncio import AsyncIOMotorClient
-
-load_dotenv("D:/vasooli/.env")
+from app.config import get_settings
 
 BASE = "http://127.0.0.1:8123"
 WEBHOOK_SOURCE = "webhook"
@@ -81,8 +84,9 @@ def money(value: float) -> float:
 
 
 async def main() -> int:
-    client = AsyncIOMotorClient(os.environ["MONGODB_URI"])
-    db = client[os.environ.get("MONGODB_DB_NAME", "vasooli")]
+    settings = get_settings()
+    client = AsyncIOMotorClient(settings.mongodb_uri)
+    db = client[settings.mongodb_db_name]
 
     print("=" * 78)
     print("STAGE 9 VERIFICATION — independent (raw motor + raw HTTP, no app imports)")

@@ -70,7 +70,9 @@ async def authorize_event(event_id: str) -> PolicyVerdictRecord:
     context = await policy_stage.gather_context(
         decision=decision, customer_ref=event.customer_ref
     )
-    verdict = policy_stage.evaluate(decision=decision, context=context)
+    verdict = policy_stage.evaluate(
+        decision=decision, context=context, currency=event.currency
+    )
 
     try:
         document_id, version = await policy_stage.append(verdict)
