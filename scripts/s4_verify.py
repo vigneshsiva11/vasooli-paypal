@@ -113,7 +113,9 @@ async def cross_check(event_id: str) -> tuple[str, str, set[str]]:
     context = await gather_context(
         decision=decision, customer_ref=event["customer_ref"]
     )
-    verdict = evaluate(decision=decision, context=context)
+    verdict = evaluate(
+        decision=decision, context=context, currency=event.get("currency", "INR")
+    )
     failed = {
         check_name(entry) for entry in verdict.checks_performed if check_failed(entry)
     }

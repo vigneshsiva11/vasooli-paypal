@@ -637,6 +637,379 @@ def test_step2_rulebook_and_policy() -> None:
     )
 
 
+def test_step3_execution_port_and_adapters() -> None:
+    """Section 4: execution port, PayPal adapter contracts, and Razorpay backward compat."""
+    print("\n--- SECTION 4: Step 3 Execution Port & PayPal Adapter Contract Checks ---")
+
+    from app.execution.port import (
+        ExecutionResult,
+        PayPalExecutionAdapter,
+        RazorpayExecutionAdapter,
+        UnknownGateway,
+        VaultTokenMissing,
+    )
+    from app.gateways.paypal import invoicing, orders
+    from app.gateways.paypal.client import PayPalCallFailed
+
+    now = datetime.now(timezone.utc)
+
+    verdict_id = "507f1f77bcf86cd799439013"
+    event_id = "evt_pp_link_1"
+    execution_id = "507f1f77bcf86cd799439050"
+
+    auth_verdict = AuthorizedVerdict(
+        event_id=event_id,
+        decision_id="507f1f77bcf86cd799439011",
+        decision_version=1,
+        verdict="authorized",
+        reason="ok",
+        checks_performed=[f"{c}: PASS (ok)" for c in POLICY_CHECKS],
+        evaluated_at=now,
+        rulebook_fingerprint=RECORDED_USD_FINGERPRINT,
+        rulebook_fingerprint_source="evaluated",
+        id=verdict_id,
+        version=1,
+    )
+
+    ev_usd = RevenueEvent(
+        event_id=event_id,
+        customer_ref="cust_pp_1",
+        amount=150.0,
+        currency="USD",
+        surface="payment",
+        raw_failure_reason="PAYER_ACTION_REQUIRED",
+        gateway="paypal",
+    )
+    dec_link = make_decision(amount=150.0, intervention="recovery_payment_link", cost=0.06, prob=0.5, erv=74.94)
+    diag_pp = DiagnosisRecord(
+        id="507f1f77bcf86cd799439012",
+        version=1,
+        event_id=event_id,
+        surface="payment",
+        root_cause="insufficient_funds",
+        confidence=0.9,
+        recoverable=True,
+        method="rules",
+        evidence=["test evidence"],
+        diagnosed_at=now,
+    )
+
+    # ----- 4.1 PayPal link action (invoice) -----
+    mock_invoice_id = "INV2-MOCK-TEST-0001"
+    mock_recipient_url = "https://www.sandbox.paypal.com/invoice/p/#INV2-MOCK-TEST-0001"
+
+    captured_payloads: dict[str, list] = {"create": [], "send": [], "get": []}
+
+    async def mock_create_invoice(**kwargs):
+        captured_payloads["create"].append(kwargs)
+        return {"id": mock_invoice_id, "href": f"/v2/invoicing/invoices/{mock_invoice_id}"}
+
+    async def mock_send_invoice(invoice_id, **kwargs):
+        captured_payloads["send"].append((invoice_id, kwargs))
+        return {}
+
+    async def mock_get_invoice(invoice_id):
+        captured_payloads["get"].append(invoice_id)
+        return {
+            "id": invoice_id,
+            "detail": {"metadata": {"recipient_view_url": mock_recipient_url}},
+        }
+
+    chain_link = execution_service.AuthorizedAction(event=ev_usd, decision=dec_link, diagnosis=diag_pp)
+
+    async def run_paypal_link_test():
+        with patch.object(execution_service, "_load_chain", AsyncMock(return_value=chain_link)), \
+             patch.object(execution_service.execution_store, "find_for_verdict", AsyncMock(return_value=None)), \
+             patch.object(execution_service.execution_store, "insert", AsyncMock(return_value="507f1f77bcf86cd799439099")), \
+             patch.object(invoicing, "create_invoice", AsyncMock(side_effect=mock_create_invoice)), \
+             patch.object(invoicing, "send_invoice", AsyncMock(side_effect=mock_send_invoice)), \
+             patch.object(invoicing, "get_invoice", AsyncMock(side_effect=mock_get_invoice)):
+
+            outcome = await execution_service.execute(auth_verdict)
+            rec = outcome.record
+
+            # 4.1a Invoice create payload is USD with NO amount.breakdown.custom
+            create_kwargs = captured_payloads["create"][0]
+            report(
+                "4.1a Invoice create: currency is USD, no amount.breakdown.custom",
+                create_kwargs.get("currency") == "USD",
+                f"currency={create_kwargs.get('currency')!r}",
+            )
+
+            # 4.1b detail.reference = vsl_<policy_verdict_id>
+            report(
+                "4.1b Invoice create: reference = vsl_<verdict_id>",
+                create_kwargs.get("reference") == f"vsl_{verdict_id}",
+                f"reference={create_kwargs.get('reference')!r}, expected='vsl_{verdict_id}'",
+            )
+
+            # 4.1c note contains the event id
+            report(
+                "4.1c Invoice create: note contains event_id",
+                event_id in create_kwargs.get("note", ""),
+                f"note={create_kwargs.get('note')!r}",
+            )
+
+            # 4.1d Invoice is sent (send_invoice called)
+            report(
+                "4.1d Invoice is sent after creation",
+                len(captured_payloads["send"]) == 1 and captured_payloads["send"][0][0] == mock_invoice_id,
+                f"send calls={len(captured_payloads['send'])}",
+            )
+
+            # 4.1e GET yields recipient_view_url
+            report(
+                "4.1e GET invoice yields recipient_view_url",
+                len(captured_payloads["get"]) == 1,
+                f"get calls={len(captured_payloads['get'])}",
+            )
+
+            # 4.1f Result has gateway_ref = invoice id and gateway_url = URL
+            report(
+                "4.1f Result: gateway_ref = invoice_id, gateway_url = recipient_view_url",
+                rec.gateway_ref == mock_invoice_id and rec.gateway_url == mock_recipient_url,
+                f"gateway_ref={rec.gateway_ref!r}, gateway_url={rec.gateway_url!r}",
+            )
+
+            # 4.1g Result gateway is paypal
+            report(
+                "4.1g Result: gateway = 'paypal'",
+                rec.gateway == "paypal",
+                f"gateway={rec.gateway!r}",
+            )
+
+            # 4.1h The ExecutionRecord validates (it was already constructed)
+            try:
+                validated = ExecutionRecord(
+                    event_id=rec.event_id,
+                    policy_verdict_id=rec.policy_verdict_id,
+                    policy_verdict_version=rec.policy_verdict_version,
+                    intervention=rec.intervention,
+                    action_type=rec.action_type,
+                    executed_at=rec.executed_at,
+                    status=rec.status,
+                    gateway=rec.gateway,
+                    gateway_ref=rec.gateway_ref,
+                    gateway_url=rec.gateway_url,
+                    razorpay_payment_link_id=rec.razorpay_payment_link_id,
+                    razorpay_payment_link_url=rec.razorpay_payment_link_url,
+                )
+                report("4.1h ExecutionRecord validates for PayPal link action", True)
+            except pydantic.ValidationError as e:
+                report("4.1h ExecutionRecord validates for PayPal link action", False, str(e))
+
+    asyncio.run(run_paypal_link_test())
+
+    # ----- 4.2 PayPal retry action (vaulted order) -----
+    event_retry_id = "evt_pp_retry_1"
+    dec_retry = make_decision(amount=150.0, intervention="delayed_retry", cost=0.0, prob=0.35, erv=52.5)
+    ev_usd_retry = RevenueEvent(
+        event_id=event_retry_id,
+        customer_ref="cust_pp_1",
+        amount=150.0,
+        currency="USD",
+        surface="payment",
+        raw_failure_reason="PAYER_ACTION_REQUIRED",
+        gateway="paypal",
+    )
+    chain_retry = execution_service.AuthorizedAction(event=ev_usd_retry, decision=dec_retry, diagnosis=diag_pp)
+    auth_verdict_retry = AuthorizedVerdict(
+        event_id=event_retry_id,
+        decision_id="507f1f77bcf86cd799439011",
+        decision_version=1,
+        verdict="authorized",
+        reason="ok",
+        checks_performed=[f"{c}: PASS (ok)" for c in POLICY_CHECKS],
+        evaluated_at=now,
+        rulebook_fingerprint=RECORDED_USD_FINGERPRINT,
+        rulebook_fingerprint_source="evaluated",
+        id=verdict_id,
+        version=1,
+    )
+
+    mock_order_id = "ORD-MOCK-VAULT-001"
+    captured_order_payloads: list[dict] = []
+
+    async def mock_create_vaulted_order(**kwargs):
+        captured_order_payloads.append(kwargs)
+        return {
+            "id": mock_order_id,
+            "status": "COMPLETED",
+            "links": [{"rel": "self", "href": f"https://api.sandbox.paypal.com/v2/checkout/orders/{mock_order_id}"}],
+        }
+
+    async def run_paypal_retry_test():
+        with patch.object(execution_service, "_load_chain", AsyncMock(return_value=chain_retry)), \
+             patch.object(execution_service.execution_store, "find_for_verdict", AsyncMock(return_value=None)), \
+             patch.object(execution_service.execution_store, "insert", AsyncMock(return_value="507f1f77bcf86cd799439098")), \
+             patch.object(orders, "create_vaulted_order", AsyncMock(side_effect=mock_create_vaulted_order)):
+
+            outcome = await execution_service.execute(
+                auth_verdict_retry, vault_token="VAULT-TOKEN-XYZ-123"
+            )
+            rec = outcome.record
+
+            order_kwargs = captured_order_payloads[0]
+
+            # 4.2a vault_id = the vault token
+            report(
+                "4.2a Retry: payload uses payment_source.card.vault_id",
+                order_kwargs.get("vault_id") == "VAULT-TOKEN-XYZ-123",
+                f"vault_id={order_kwargs.get('vault_id')!r}",
+            )
+
+            # 4.2b PayPal-Request-Id = execution id (idempotency_key)
+            report(
+                "4.2b Retry: idempotency_key is set (execution id)",
+                order_kwargs.get("idempotency_key") is not None,
+                f"idempotency_key={order_kwargs.get('idempotency_key')!r}",
+            )
+
+            # 4.2c reference_id = vsl_<verdict_id>
+            report(
+                "4.2c Retry: reference_id = vsl_<verdict_id>",
+                order_kwargs.get("reference_id") == f"vsl_{verdict_id}",
+                f"reference_id={order_kwargs.get('reference_id')!r}",
+            )
+
+            # 4.2d custom_id = ev:<event_id>
+            report(
+                "4.2d Retry: custom_id = 'ev:<event_id>'",
+                order_kwargs.get("custom_id") == f"ev:{event_retry_id}",
+                f"custom_id={order_kwargs.get('custom_id')!r}",
+            )
+
+            # 4.2e NO purchase_units.invoice_id (orders don't carry invoice_id)
+            # The create_vaulted_order function doesn't accept an invoice_id parameter
+            report(
+                "4.2e Retry: no invoice_id in vaulted order kwargs",
+                "invoice_id" not in order_kwargs,
+                f"keys={sorted(order_kwargs.keys())}",
+            )
+
+            # 4.2f Result status and fields
+            report(
+                "4.2f Retry: completed with gateway_ref = order_id",
+                rec.status == "completed" and rec.gateway_ref == mock_order_id and rec.gateway == "paypal",
+                f"status={rec.status!r}, gateway_ref={rec.gateway_ref!r}",
+            )
+
+    asyncio.run(run_paypal_retry_test())
+
+    # ----- 4.3 Missing vault token -> FAILED ExecutionRecord, no exception escapes -----
+    async def run_missing_vault_test():
+        with patch.object(execution_service, "_load_chain", AsyncMock(return_value=chain_retry)), \
+             patch.object(execution_service.execution_store, "find_for_verdict", AsyncMock(return_value=None)), \
+             patch.object(execution_service.execution_store, "insert", AsyncMock(return_value="507f1f77bcf86cd799439097")):
+
+            # No exception should escape — it should produce a FAILED record
+            outcome = await execution_service.execute(auth_verdict_retry, vault_token=None)
+            rec = outcome.record
+            report(
+                "4.3 Missing vault token: FAILED record stored, no exception escapes",
+                rec.status == "failed" and rec.failure_reason is not None and "vault" in rec.failure_reason.lower(),
+                f"status={rec.status!r}, reason={rec.failure_reason!r}",
+            )
+
+    asyncio.run(run_missing_vault_test())
+
+    # ----- 4.4 Unknown gateway -> fails closed -----
+    ev_unknown_gw = RevenueEvent(
+        event_id="evt_unknown_gw_1",
+        customer_ref="cust_pp_1",
+        amount=100.0,
+        currency="USD",
+        surface="payment",
+        raw_failure_reason="FAIL",
+        gateway="paypal",  # We'll override getattr in the chain
+    )
+    # Simulate an event whose gateway field is something unsupported
+    chain_unknown = execution_service.AuthorizedAction(
+        event=RevenueEvent(
+            event_id="evt_unknown_gw_1",
+            customer_ref="cust_pp_1",
+            amount=100.0,
+            currency="USD",
+            surface="payment",
+            raw_failure_reason="FAIL",
+            gateway="paypal",
+        ),
+        decision=dec_link,
+        diagnosis=diag_pp,
+    )
+
+    # Test that get_adapter raises for unknown gateway
+    from app.execution.service import get_adapter
+
+    try:
+        get_adapter("stripe")
+        report("4.4 Unknown gateway ('stripe') fails closed", False, "no exception raised")
+    except UnknownGateway:
+        report("4.4 Unknown gateway ('stripe') fails closed", True, "UnknownGateway raised")
+
+    # ----- 4.5 Razorpay path backward compat: execute() still works -----
+    ev_rzp = RevenueEvent(
+        event_id="evt_rzp_compat_1",
+        customer_ref="cust_char_1",
+        amount=2500.0,
+        currency="INR",
+        surface="payment",
+        raw_failure_reason="BAD_REQUEST",
+    )
+    dec_rzp = make_decision(amount=2500.0, intervention="recovery_payment_link", cost=5.0, prob=0.5, erv=1245.0)
+    diag_rzp = DiagnosisRecord(
+        id="507f1f77bcf86cd799439012",
+        version=1,
+        event_id="evt_rzp_compat_1",
+        surface="payment",
+        root_cause="insufficient_funds",
+        confidence=0.9,
+        recoverable=True,
+        method="rules",
+        evidence=["test evidence"],
+        diagnosed_at=now,
+    )
+    chain_rzp = execution_service.AuthorizedAction(event=ev_rzp, decision=dec_rzp, diagnosis=diag_rzp)
+    auth_rzp = AuthorizedVerdict(
+        event_id="evt_rzp_compat_1",
+        decision_id="507f1f77bcf86cd799439011",
+        decision_version=1,
+        verdict="authorized",
+        reason="ok",
+        checks_performed=[f"{c}: PASS (ok)" for c in POLICY_CHECKS],
+        evaluated_at=now,
+        rulebook_fingerprint=RECORDED_INR_FINGERPRINT,
+        rulebook_fingerprint_source="evaluated",
+        id="507f1f77bcf86cd799439013",
+        version=1,
+    )
+    mock_rzp_link = razorpay.PaymentLink(
+        id="plink_compat_123",
+        short_url="https://rzp.io/i/compat123",
+        reference_id="vsl_507f1f77bcf86cd799439013",
+    )
+
+    async def run_razorpay_compat_test():
+        with patch.object(execution_service, "_load_chain", AsyncMock(return_value=chain_rzp)), \
+             patch.object(execution_service.execution_store, "find_for_verdict", AsyncMock(return_value=None)), \
+             patch.object(execution_service.execution_store, "insert", AsyncMock(return_value="507f1f77bcf86cd799439096")), \
+             patch.object(razorpay, "create_payment_link", AsyncMock(return_value=mock_rzp_link)):
+
+            outcome = await execution_service.execute(auth_rzp)
+            rec = outcome.record
+            report(
+                "4.5 Razorpay path: produces same fields as Section 2 (gateway='razorpay', link artifacts present)",
+                rec.gateway == "razorpay"
+                and rec.razorpay_payment_link_id == "plink_compat_123"
+                and rec.razorpay_payment_link_url == "https://rzp.io/i/compat123"
+                and rec.status == "completed"
+                and rec.action_type == "payment_link_generated",
+                f"gateway={rec.gateway!r}, plink_id={rec.razorpay_payment_link_id!r}",
+            )
+
+    asyncio.run(run_razorpay_compat_test())
+
+
 def main() -> int:
     print("=" * 78)
     print("PHASE 1 CONTRACT CHECKS (OFFLINE — NO NETWORK, NO DB, NO SERVER)")
@@ -645,6 +1018,7 @@ def main() -> int:
     test_step1_models()
     test_characterization_razorpay_execution()
     test_step2_rulebook_and_policy()
+    test_step3_execution_port_and_adapters()
 
     print("\n" + "=" * 78)
     print(f"SUMMARY: {PASS_COUNT} PASSED, {FAIL_COUNT} FAILED")

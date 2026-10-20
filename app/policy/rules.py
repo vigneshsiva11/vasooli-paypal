@@ -282,8 +282,10 @@ def rulebook_registry() -> dict[str, Rulebook]:
     registry = {rulebook.fingerprint: rulebook for rulebook in SUPERSEDED_RULEBOOKS}
     inr = current_inr_rulebook()
     usd = current_usd_rulebook()
+    eur = unknown_currency_rulebook("EUR")
     registry[inr.fingerprint] = inr
     registry[usd.fingerprint] = usd
+    registry[eur.fingerprint] = eur
     return registry
 
 

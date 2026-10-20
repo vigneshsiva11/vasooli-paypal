@@ -127,7 +127,7 @@ def main() -> None:
             not dx["recoverable"] or dx["confidence"] < CONFIDENCE_FLOOR
         )
         if not gated:
-            scored = evaluate(dx["surface"], dx["root_cause"], amount)
+            scored = evaluate(dx["surface"], dx["root_cause"], amount, currency=currency)
             print(f"  candidates scored ({len(scored)}), best first:")
             for index, (candidate, cost, erv) in enumerate(scored):
                 manual = amount * candidate.recovery_probability - cost
@@ -159,7 +159,7 @@ def main() -> None:
             mismatches.append(f"{event_id}: stored ERV != recomputed {recomputed}")
 
         if not gated:
-            best = evaluate(dx["surface"], dx["root_cause"], amount)[0]
+            best = evaluate(dx["surface"], dx["root_cause"], amount, currency=currency)[0]
             expected_name = best[0].intervention
             if best[2] < 0 and expected_name not in NO_ACTION_INTERVENTIONS:
                 expected_name = "no_action_negative_erv"

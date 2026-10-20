@@ -34,7 +34,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-from app.db import close_mongo_connection, connect_to_mongo
+from app.db import close_mongo_connection, connect_to_mongo, get_database
 from app.decision import latest_decision
 from app.ingestion import upsert_event
 from app.models import DecisionRecord, RevenueEvent
@@ -96,6 +96,42 @@ EVENTS = [
         "customer_ref": OPT_OUT_CUSTOMER,
         "raw_failure_reason": "gateway_timeout",
     },
+    # USD auto tier ($150 < $250) -> authorized (ok)
+    {
+        "event_id": "pol_S4_USD_AUTO",
+        "surface": "payment",
+        "amount": 150.00,
+        "currency": "USD",
+        "customer_ref": "cust_pol_S4_usd_auto",
+        "raw_failure_reason": "insufficient_funds",
+    },
+    # USD approval required ($500 >= $250 and < $1,000) -> requires_manual_review (amount_requires_approval)
+    {
+        "event_id": "pol_S4_USD_APPROVAL",
+        "surface": "payment",
+        "amount": 500.00,
+        "currency": "USD",
+        "customer_ref": "cust_pol_S4_usd_appr",
+        "raw_failure_reason": "insufficient_funds",
+    },
+    # USD never auto ($1,500 >= $1,000) -> requires_manual_review (amount_never_auto)
+    {
+        "event_id": "pol_S4_USD_NEVER",
+        "surface": "payment",
+        "amount": 1500.00,
+        "currency": "USD",
+        "customer_ref": "cust_pol_S4_usd_never",
+        "raw_failure_reason": "insufficient_funds",
+    },
+    # Unsupported currency (EUR) -> requires_manual_review (unsupported_currency)
+    {
+        "event_id": "pol_S4_EUR_UNSUPPORTED",
+        "surface": "payment",
+        "amount": 300.00,
+        "currency": "EUR",
+        "customer_ref": "cust_pol_S4_eur",
+        "raw_failure_reason": "insufficient_funds",
+    },
 ]
 
 #: Hours before now at which the three prior contacts on `pol_S4_CAP` were
@@ -121,15 +157,26 @@ def post(path: str, payload: dict | None = None) -> tuple[int, dict]:
 
 
 async def seed_events() -> None:
-    await connect_to_mongo()
     print("1. Events")
+    await connect_to_mongo()
+    db = get_database()
+    await db["customer_opt_outs"].delete_many({"customer_ref": OPT_OUT_CUSTOMER})
+    await db["policy_verdicts"].delete_many({"event_id": {"$regex": "^pol_S4_"}})
     for payload in EVENTS:
-        event = RevenueEvent(**payload)
-        document_id, created = await upsert_event(event)
-        print(
-            f"   {event.event_id:<24} {event.currency} {event.amount:>9,.2f}  "
-            f"{event.customer_ref:<22} created={created}"
-        )
+        status, body = post("/events", payload)
+        if status in (200, 201):
+            created = (status == 201)
+            print(
+                f"   {payload['event_id']:<24} {payload['currency']} {payload['amount']:>9,.2f}  "
+                f"{payload['customer_ref']:<22} created={created} (HTTP {status})"
+            )
+        else:
+            event = RevenueEvent(**payload)
+            document_id, created = await upsert_event(event)
+            print(
+                f"   {event.event_id:<24} {event.currency} {event.amount:>9,.2f}  "
+                f"{event.customer_ref:<22} created={created}"
+            )
     await close_mongo_connection()
 
 
