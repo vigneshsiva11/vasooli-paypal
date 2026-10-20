@@ -232,6 +232,7 @@ async def create_vaulted_order(
     amount: float,
     currency: str = "USD",
     reference_id: str | None = None,
+    custom_id: str | None = None,
     description: str = "Vasooli vaulted retry",
     idempotency_key: str | None = None,
 ) -> dict[str, Any]:
@@ -246,6 +247,7 @@ async def create_vaulted_order(
         amount: Charge amount in major units.
         currency: ISO 4217.
         reference_id: Our idempotency reference.
+        custom_id: Merchant tracking reference (e.g. ev:<event_id>).
         description: Item description.
         idempotency_key: PayPal-Request-Id value.
 
@@ -258,18 +260,20 @@ async def create_vaulted_order(
     req_id = idempotency_key or str(uuid.uuid4())
     ref = reference_id or req_id
 
+    pu: dict[str, Any] = {
+        "reference_id": ref[:127],
+        "description": description[:127],
+        "amount": {
+            "currency_code": currency,
+            "value": f"{amount:.2f}",
+        },
+    }
+    if custom_id:
+        pu["custom_id"] = custom_id
+
     order_payload: dict[str, Any] = {
         "intent": "CAPTURE",
-        "purchase_units": [
-            {
-                "reference_id": ref[:127],
-                "description": description[:127],
-                "amount": {
-                    "currency_code": currency,
-                    "value": f"{amount:.2f}",
-                },
-            }
-        ],
+        "purchase_units": [pu],
         "payment_source": {
             "card": {
                 "vault_id": vault_id,

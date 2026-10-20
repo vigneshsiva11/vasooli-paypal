@@ -218,7 +218,7 @@ class ExecutionRecord(BaseModel):
         ...,
         description="The shape of what was done. Derived from `intervention`.",
     )
-    gateway: Literal["razorpay", "paypal"] = Field(
+    gateway: str = Field(
         default="razorpay",
         description="Payment gateway used for execution.",
     )
@@ -365,8 +365,9 @@ class ExecutionRecord(BaseModel):
             if self.gateway == "paypal":
                 paypal_link_fields = {
                     "gateway_ref": self.gateway_ref,
-                    "gateway_url": self.gateway_url,
                 }
+                if self.action_type == "payment_link_generated":
+                    paypal_link_fields["gateway_url"] = self.gateway_url
                 missing = sorted(name for name, value in paypal_link_fields.items() if not value)
                 if missing:
                     raise ValueError(

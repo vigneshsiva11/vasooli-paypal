@@ -227,12 +227,13 @@ async def _assert_verdict_authorizes(record: ExecutionRecord) -> None:
         )
 
 
-async def insert(record: ExecutionRecord) -> str:
+async def insert(record: ExecutionRecord, execution_id: str | None = None) -> str:
     """Store an execution record.
 
     Args:
         record: A validated record. Its `executed_at` should already be the real
             send time — this function does not stamp one.
+        execution_id: Optional predetermined MongoDB document id string.
 
     Returns:
         The new document's id.
@@ -243,8 +244,15 @@ async def insert(record: ExecutionRecord) -> str:
     """
     await _assert_verdict_authorizes(record)
 
+    doc = record.model_dump()
+    if execution_id is not None:
+        try:
+            doc["_id"] = ObjectId(execution_id)
+        except Exception:
+            pass
+
     try:
-        result = await collection().insert_one(record.model_dump())
+        result = await collection().insert_one(doc)
     except DuplicateKeyError:
         existing = await find_for_verdict(record.policy_verdict_id)
         if existing is None:  # pragma: no cover - would mean the index lied

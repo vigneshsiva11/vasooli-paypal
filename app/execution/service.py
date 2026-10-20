@@ -55,6 +55,16 @@ from app.decision import store as decision_store
 from app.diagnosis import store as diagnosis_store
 from app.execution import razorpay, templates
 from app.execution import store as execution_store
+from app.execution.port import (
+    ExecutionPort,
+    ExecutionPortError,
+    ExecutionResult,
+    PayPalExecutionAdapter,
+    RazorpayExecutionAdapter,
+    UnknownGateway,
+    VaultTokenMissing,
+)
+from app.gateways.paypal.client import PayPalCallFailed
 from app.ingestion import store as event_store
 from app.models import DecisionRecord, DiagnosisRecord, RevenueEvent
 from app.models.execution import (
@@ -206,44 +216,49 @@ def _link_description(*, event: RevenueEvent, intervention: str, root_cause: str
     return text[:LINK_DESCRIPTION_MAX]
 
 
+ADAPTERS: dict[str, type[ExecutionPort]] = {
+    "razorpay": RazorpayExecutionAdapter,
+    "paypal": PayPalExecutionAdapter,
+}
+
+
+def get_adapter(gateway: str) -> ExecutionPort:
+    """Return the execution adapter registered for the given gateway.
+
+    Raises:
+        UnknownGateway: if no adapter is registered.
+    """
+    adapter_cls = ADAPTERS.get(gateway)
+    if adapter_cls is None:
+        raise UnknownGateway(f"Unknown gateway {gateway!r}; execution cannot proceed")
+    return adapter_cls()
+
+
 async def _execute_link(
     *,
     verdict: AuthorizedVerdict,
     event: RevenueEvent,
     decision: DecisionRecord,
     root_cause: str,
-    credentials: razorpay.RazorpayCredentials | None,
+    credentials: razorpay.RazorpayCredentials | None = None,
+    execution_id: str | None = None,
 ) -> dict[str, Any]:
-    """Create a Razorpay payment link and return the fields it contributes.
+    """Create a payment link and return the fields it contributes.
 
     Raises:
         razorpay.RazorpayNotConfigured: no credentials. Nothing was attempted.
         razorpay.RazorpayCallFailed: the call was made and did not succeed.
     """
-    link = await razorpay.create_payment_link(
-        amount=decision.revenue_at_risk,
-        currency=event.currency,
-        description=_link_description(
-            event=event,
-            intervention=decision.recommended_intervention,
-            root_cause=root_cause,
-        ),
-        reference_id=razorpay.reference_id_for(verdict.id),
-        notes={
-            # Everything needed to walk back from a Razorpay dashboard row to the
-            # authorization that produced it, without a lookup table.
-            "vasooli_event_id": event.event_id,
-            "vasooli_customer_ref": event.customer_ref,
-            "vasooli_policy_verdict_id": verdict.id,
-            "vasooli_intervention": decision.recommended_intervention,
-            "vasooli_root_cause": root_cause,
-        },
+    adapter = get_adapter(getattr(event, "gateway", "razorpay"))
+    result = await adapter.execute_link(
+        verdict=verdict,
+        event=event,
+        decision=decision,
+        root_cause=root_cause,
+        execution_id=execution_id,
         credentials=credentials,
     )
-    return {
-        "razorpay_payment_link_id": link.id,
-        "razorpay_payment_link_url": link.short_url,
-    }
+    return result.to_record_fields()
 
 
 def _execute_contact(
@@ -277,15 +292,15 @@ async def execute(
     verdict: AuthorizedVerdict,
     *,
     credentials: razorpay.RazorpayCredentials | None = None,
+    vault_token: str | None = None,
 ) -> ExecutionOutcome:
     """Perform the action one authorized verdict permits, at most once.
 
     Args:
         verdict: The stored verdict, narrowed by `require_authorized`. The type is
             the precondition; there is no permission check in the body.
-        credentials: Razorpay keys, defaulting to the configured pair. An explicit
-            pair is how the failure test drives a real rejection without mutating a
-            module global.
+        credentials: Keys defaulting to the configured pair.
+        vault_token: Stored payment method vault identifier for vaulted retries.
 
     Returns:
         The record and whether this call created it.
@@ -333,32 +348,49 @@ async def execute(
     fields: dict[str, Any] = {}
     status = "completed"
     failure_reason: str | None = None
+    gateway = getattr(event, "gateway", "razorpay")
+    execution_id = str(ObjectId())
 
     try:
         if action_type in LINK_ACTION_TYPES:
-            fields = await _execute_link(
-                verdict=verdict,
-                event=event,
-                decision=decision,
-                root_cause=root_cause,
-                credentials=credentials,
-            )
+            adapter = get_adapter(gateway)
+            if action_type == "payment_link_generated":
+                result = await adapter.execute_link(
+                    verdict=verdict,
+                    event=event,
+                    decision=decision,
+                    root_cause=root_cause,
+                    execution_id=execution_id,
+                    credentials=credentials,
+                )
+            else:  # retry_simulated
+                result = await adapter.execute_retry(
+                    verdict=verdict,
+                    event=event,
+                    decision=decision,
+                    root_cause=root_cause,
+                    execution_id=execution_id,
+                    vault_token=vault_token,
+                    credentials=credentials,
+                )
+            fields = result.to_record_fields()
         elif action_type in CONTACT_ACTION_TYPES:
             fields = _execute_contact(
                 event=event, decision=decision, root_cause=root_cause
             )
+            fields["gateway"] = gateway
         else:  # pragma: no cover - the table and the sets are checked at import
             raise ExecutionError(
                 f"action type {action_type!r} has no handler in this module"
             )
-    except razorpay.RazorpayCallFailed as exc:
-        # The attempt was made and did not succeed. This is a real execution
-        # outcome, so it is recorded — with no artifact fields, which the model
-        # enforces — rather than raised. A stored failure is what releases the
-        # contact-cap slot and the cooldown anchor, making re-authorization possible.
+    except (razorpay.RazorpayCallFailed, PayPalCallFailed, ExecutionPortError) as exc:
+        # The attempt was made and did not succeed, or the gateway/token was invalid.
+        # This is a real execution outcome, so it is recorded — with no artifact fields,
+        # which the model enforces — rather than raised. A stored failure is what
+        # releases the contact-cap slot and the cooldown anchor.
         status = "failed"
         failure_reason = str(exc)
-        fields = {}
+        fields = {"gateway": gateway}
         logger.warning(
             "Execution of %s for event %s failed: %s",
             intervention,
@@ -381,7 +413,7 @@ async def execute(
     )
 
     try:
-        document_id = await execution_store.insert(record)
+        document_id = await execution_store.insert(record, execution_id=execution_id)
     except execution_store.DuplicateExecution as exc:
         # Lost a race against a concurrent request. The other one's side effect is
         # the one that counts; ours produced a second Razorpay link only if the

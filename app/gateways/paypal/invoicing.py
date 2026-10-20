@@ -30,6 +30,7 @@ async def create_invoice(
     amount: float,
     currency: str = "USD",
     note: str = "Vasooli recovery invoice",
+    reference: str | None = None,
     allow_partial_payment: bool = True,
     minimum_amount_due: float | None = None,
     idempotency_key: str | None = None,
@@ -41,6 +42,7 @@ async def create_invoice(
         amount: Total amount due, in major units (dollars).
         currency: ISO 4217 code.
         note: Shown on the invoice.
+        reference: Merchant reference for the invoice (e.g. vsl_<policy_verdict_id>).
         allow_partial_payment: Enables partial_payment on the invoice.
         minimum_amount_due: Only used when allow_partial_payment is True.
         idempotency_key: Deterministic key for PayPal-Request-Id.  A UUID4
@@ -55,12 +57,16 @@ async def create_invoice(
     """
     req_id = idempotency_key or str(uuid.uuid4())
 
+    detail: dict[str, Any] = {
+        "currency_code": currency,
+        "note": note,
+        "payment_term": {"term_type": "DUE_ON_RECEIPT"},
+    }
+    if reference:
+        detail["reference"] = reference
+
     payload: dict[str, Any] = {
-        "detail": {
-            "currency_code": currency,
-            "note": note,
-            "payment_term": {"term_type": "DUE_ON_RECEIPT"},
-        },
+        "detail": detail,
         "primary_recipients": [
             {
                 "billing_info": {
