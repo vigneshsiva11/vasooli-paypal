@@ -86,12 +86,19 @@ class Snapshot:
         return {str(document["_id"]): document for document in self.executions}
 
 
-async def load_snapshot(event_id: str | None = None) -> Snapshot:
+async def load_snapshot(
+    event_id: str | None = None,
+    currency: str | None = None,
+) -> Snapshot:
     """Read every collection this stage aggregates over.
 
     Args:
         event_id: when given, restrict every collection to that event. Used by the
             audit trail, which needs one event's history and not the whole database.
+        currency: when given, restrict every collection to events in that currency.
+            No cross-currency sums are performed; only that currency's events,
+            diagnoses, decisions, verdicts, executions, verifications, and promises
+            are returned in the snapshot.
 
     Sorted at read time — by `version` where a collection is versioned, by its own
     timestamp otherwise — so "chronological order" is a property of the data every
@@ -104,14 +111,32 @@ async def load_snapshot(event_id: str | None = None) -> Snapshot:
         cursor = database[collection].find(scope).sort(sort_key, 1)
         return tuple(await cursor.to_list(length=None))
 
+    events = await read(EVENTS, "created_at")
+    diagnoses = await read(DIAGNOSES, "version")
+    decisions = await read(DECISIONS, "version")
+    verdicts = await read(VERDICTS, "version")
+    executions = await read(EXECUTIONS, "executed_at")
+    verifications = await read(VERIFICATIONS, "verified_at")
+    promises = await read(PROMISES, "created_at")
+
+    if currency is not None:
+        events = tuple(e for e in events if e.get("currency", "INR") == currency)
+        valid_event_ids = {e["event_id"] for e in events}
+        diagnoses = tuple(d for d in diagnoses if d.get("event_id") in valid_event_ids)
+        decisions = tuple(d for d in decisions if d.get("event_id") in valid_event_ids)
+        verdicts = tuple(v for v in verdicts if v.get("event_id") in valid_event_ids)
+        executions = tuple(x for x in executions if x.get("event_id") in valid_event_ids)
+        verifications = tuple(v for v in verifications if v.get("event_id") in valid_event_ids)
+        promises = tuple(p for p in promises if p.get("event_id") in valid_event_ids)
+
     return Snapshot(
-        events=await read(EVENTS, "created_at"),
-        diagnoses=await read(DIAGNOSES, "version"),
-        decisions=await read(DECISIONS, "version"),
-        verdicts=await read(VERDICTS, "version"),
-        executions=await read(EXECUTIONS, "executed_at"),
-        verifications=await read(VERIFICATIONS, "verified_at"),
-        promises=await read(PROMISES, "created_at"),
+        events=events,
+        diagnoses=diagnoses,
+        decisions=decisions,
+        verdicts=verdicts,
+        executions=executions,
+        verifications=verifications,
+        promises=promises,
         read_at=_utc_now(),
     )
 

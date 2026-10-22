@@ -1,0 +1,151 @@
+{
+  "id": "WH-1RE78495JY012312N-27K95268GW736715F",
+  "event_version": "1.0",
+  "create_time": "2026-10-15T16:30:57.731Z",
+  "resource_type": "invoices",
+  "event_type": "INVOICING.INVOICE.CREATED",
+  "summary": "An invoice is created.",
+  "resource": {
+    "invoice": {
+      "id": "INV2-LSEJ-2LLG-D59L-2QNU",
+      "status": "SENT",
+      "detail": {
+        "currency_code": "USD",
+        "note": "Vasooli recovery invoice",
+        "category_code": "SHIPPABLE",
+        "invoice_number": "0005",
+        "invoice_date": "2026-10-15",
+        "payment_term": {
+          "term_type": "DUE_ON_RECEIPT"
+        },
+        "viewed_by_recipient": false,
+        "group_draft": false,
+        "metadata": {
+          "create_time": "2026-10-15T16:30:43Z",
+          "last_update_time": "2026-10-15T16:30:43Z",
+          "first_sent_time": "2026-10-15T16:30:44Z",
+          "last_sent_time": "2026-10-15T16:30:44Z",
+          "created_by_flow": "REGULAR_SINGLE",
+          "recipient_view_url": "https://www.sandbox.paypal.com/invoice/p/#LSEJ2LLGD59L2QNU",
+          "invoicer_view_url": "https://www.sandbox.paypal.com/invoice/details/INV2-LSEJ-2LLG-D59L-2QNU",
+          "caller_type": "API_V2_INVOICE",
+          "spam_info": {}
+        },
+        "archived": false
+      },
+      "invoicer": {},
+      "primary_recipients": [
+        {
+          "billing_info": {
+            "email_address": "sb-38n4q53381803@personal.example.com"
+          }
+        }
+      ],
+      "items": [
+        {
+          "id": "ITEM-6E982796V24765803",
+          "name": "Recovery amount",
+          "quantity": "1",
+          "unit_amount": {
+            "currency_code": "USD",
+            "value": "100.00"
+          }
+        }
+      ],
+      "configuration": {
+        "tax_calculated_after_discount": false,
+        "tax_inclusive": false,
+        "allow_tip": false,
+        "partial_payment": {
+          "allow_partial_payment": true,
+          "minimum_amount_due": {
+            "currency_code": "USD",
+            "value": "10.00"
+          }
+        },
+        "allow_only_pay_by_bank": false,
+        "allow_vba_payments": false,
+        "save_item_for_future": true,
+        "template_id": "TEMP-9WH21082LX779862V"
+      },
+      "amount": {
+        "breakdown": {
+          "item_total": {
+            "currency_code": "USD",
+            "value": "100.00"
+          },
+          "discount": {
+            "invoice_discount": {
+              "amount": {
+                "currency_code": "USD",
+                "value": "0.00"
+              }
+            },
+            "item_discount": {
+              "currency_code": "USD",
+              "value": "0.00"
+            }
+          },
+          "tax_total": {
+            "currency_code": "USD",
+            "value": "0.00"
+          }
+        },
+        "currency_code": "USD",
+        "value": "100.00"
+      },
+      "due_amount": {
+        "currency_code": "USD",
+        "value": "100.00"
+      },
+      "links": [
+        {
+          "href": "https://api.sandbox.paypal.com/v2/invoicing/invoices/INV2-LSEJ-2LLG-D59L-2QNU",
+          "rel": "self",
+          "method": "GET"
+        },
+        {
+          "href": "https://api.sandbox.paypal.com/v2/invoicing/invoices/INV2-LSEJ-2LLG-D59L-2QNU",
+          "rel": "replace",
+          "method": "PUT"
+        },
+        {
+          "href": "https://api.sandbox.paypal.com/v2/invoicing/invoices/INV2-LSEJ-2LLG-D59L-2QNU/cancel",
+          "rel": "cancel",
+          "method": "POST"
+        },
+        {
+          "href": "https://api.sandbox.paypal.com/v2/invoicing/invoices/INV2-LSEJ-2LLG-D59L-2QNU/remind",
+          "rel": "remind",
+          "method": "POST"
+        },
+        {
+          "href": "https://api.sandbox.paypal.com/v2/invoicing/invoices/INV2-LSEJ-2LLG-D59L-2QNU/payments",
+          "rel": "record-payment",
+          "method": "POST"
+        },
+        {
+          "href": "https://api.sandbox.paypal.com/v2/invoicing/invoices/INV2-LSEJ-2LLG-D59L-2QNU/generate-qr-code",
+          "rel": "qr-code",
+          "method": "GET"
+        }
+      ],
+      "unilateral": false,
+      "settings": {}
+    }
+  },
+  "links": [
+    {
+      "href": "https://api.sandbox.paypal.com/v1/notifications/webhooks-events/WH-1RE78495JY012312N-27K95268GW736715F",
+      "rel": "self",
+      "method": "GET"
+    },
+    {
+      "href": "https://api.sandbox.paypal.com/v1/notifications/webhooks-events/WH-1RE78495JY012312N-27K95268GW736715F/resend",
+      "rel": "resend",
+      "method": "POST"
+    }
+  ],
+  "source": "captured",
+  "original_payload_sha256": "5cd5ed68d62415c9d73f27c369f761e294ae96a9f2eb8cec74cdc776e24a89ba"
+}

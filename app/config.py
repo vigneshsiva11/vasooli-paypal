@@ -22,6 +22,7 @@ class Settings(BaseSettings):
     # Application
     app_name: str = "Vasooli"
     environment: str = "development"
+    default_currency: str = "INR"
 
     # MongoDB
     mongodb_uri: str = "mongodb://localhost:27017"

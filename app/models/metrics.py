@@ -39,6 +39,15 @@ from app.models.verification import VerificationRecordDocument
 # ---------------------------------------------------------------------------
 
 
+class CurrencyCount(BaseModel):
+    """Currency and its event count."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    currency: str = Field(..., description="Currency code (e.g. 'INR', 'USD').")
+    count: int = Field(..., ge=0, description="Number of events stored in this currency.")
+
+
 class MetricsSummary(BaseModel):
     """Headline recovery numbers, computed on every request.
 
@@ -127,12 +136,6 @@ class MetricsSummary(BaseModel):
     )
 
     # --- how the recovery was established (Stage 9) ---
-    #
-    # `total_revenue_recovered` is the sum of the two amounts below and is reported
-    # unsplit as well, because it is the honest answer to "how much came back". The
-    # split exists because the two are not equally well evidenced, and a dashboard
-    # that added them into one bar would present a merchant's assertion as the
-    # gateway's word.
 
     gateway_verified_recovered: float = Field(
         ...,

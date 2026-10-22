@@ -1,0 +1,90 @@
+{
+  "id": "WH-8L187362UU567994A-61C083782M709240S",
+  "event_version": "1.0",
+  "create_time": "2026-10-15T16:31:56.595Z",
+  "resource_type": "capture",
+  "resource_version": "2.0",
+  "event_type": "PAYMENT.CAPTURE.COMPLETED",
+  "summary": "Payment completed for $ 25.0 USD",
+  "resource": {
+    "id": "54J97366HE2238715",
+    "amount": {
+      "currency_code": "USD",
+      "value": "25.00"
+    },
+    "final_capture": true,
+    "seller_protection": {
+      "status": "NOT_ELIGIBLE"
+    },
+    "seller_receivable_breakdown": {
+      "gross_amount": {
+        "currency_code": "USD",
+        "value": "25.00"
+      },
+      "paypal_fee": {
+        "currency_code": "USD",
+        "value": "1.14"
+      },
+      "net_amount": {
+        "currency_code": "USD",
+        "value": "23.86"
+      }
+    },
+    "status": "COMPLETED",
+    "processor_response": {
+      "avs_code": "A",
+      "cvv_code": "M",
+      "response_code": "0000"
+    },
+    "supplementary_data": {
+      "related_ids": {
+        "order_id": "46969136VC639191U"
+      }
+    },
+    "payee": {
+      "email_address": "sb-n3vd953304200@business.example.com",
+      "merchant_id": "FJD79RSJQC7BC"
+    },
+    "create_time": "2026-10-15T16:31:51Z",
+    "update_time": "2026-10-15T16:31:51Z",
+    "links": [
+      {
+        "href": "https://api.sandbox.paypal.com/v2/payments/captures/54J97366HE2238715",
+        "rel": "self",
+        "method": "GET"
+      },
+      {
+        "href": "https://api.sandbox.paypal.com/v2/payments/captures/54J97366HE2238715/refund",
+        "rel": "refund",
+        "method": "POST"
+      },
+      {
+        "href": "https://api.sandbox.paypal.com/v2/checkout/orders/46969136VC639191U",
+        "rel": "up",
+        "method": "GET"
+      }
+    ],
+    "network_transaction_reference": {
+      "id": "271475500990138",
+      "network": "VISA"
+    },
+    "custom_id": "ev:evt_paypal_order_capture_01"
+  },
+  "links": [
+    {
+      "href": "https://api.sandbox.paypal.com/v1/notifications/webhooks-events/WH-8L187362UU567994A-61C083782M709240S",
+      "rel": "self",
+      "method": "GET"
+    },
+    {
+      "href": "https://api.sandbox.paypal.com/v1/notifications/webhooks-events/WH-8L187362UU567994A-61C083782M709240S/resend",
+      "rel": "resend",
+      "method": "POST"
+    }
+  ],
+  "source": "derived",
+  "derived_from": "WH-8L187362UU567994A-61C083782M709240S",
+  "edits": [
+    "resource.custom_id added as 'ev:evt_paypal_order_capture_01'"
+  ]
+}

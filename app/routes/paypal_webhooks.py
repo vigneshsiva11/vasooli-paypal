@@ -26,6 +26,7 @@ Test with real sandbox events only (ngrok + PayPal Developer Dashboard webhook).
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime, timezone
 from typing import Any
@@ -43,6 +44,7 @@ from app.gateways.paypal.webhooks import (
     VerifiedPayPalWebhook,
     accept,
 )
+from app.webhooks.paypal_reconciler import reconcile_paypal_event
 
 logger = logging.getLogger(__name__)
 
@@ -158,9 +160,28 @@ async def receive_paypal_webhook(request: Request) -> Response:
             verified.paypal_event_id,
         )
 
+    # --- Reconciliation ---
+    reconcile_res = None
+    try:
+        reconcile_res = await reconcile_paypal_event(verified.payload)
+    except Exception as exc:
+        logger.error("Error reconciling PayPal event %s: %s", verified.paypal_event_id, exc)
+
+    response_payload: dict[str, Any] = {
+        "received": True,
+        "event_id": verified.paypal_event_id,
+        "duplicate": not inserted or (reconcile_res.duplicate if reconcile_res else False),
+        "reconciled": reconcile_res.processed if reconcile_res else False,
+        "matched": reconcile_res.matched if reconcile_res else False,
+        "detail": reconcile_res.detail if reconcile_res else "Event stored",
+    }
+    if reconcile_res and reconcile_res.verification_id:
+        response_payload["verification_id"] = reconcile_res.verification_id
+    if reconcile_res and reconcile_res.outcome:
+        response_payload["outcome"] = reconcile_res.outcome
+
     return Response(
-        content=f'{{"received":true,"event_id":"{verified.paypal_event_id}",'
-                f'"duplicate":{str(not inserted).lower()}}}',
+        content=json.dumps(response_payload),
         status_code=status.HTTP_200_OK,
         media_type="application/json",
     )

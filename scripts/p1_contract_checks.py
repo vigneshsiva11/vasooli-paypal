@@ -15,14 +15,21 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timezone
+import hashlib
+import json
 import sys
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
+from bson import ObjectId
 import pydantic
+from pydantic import ValidationError
+from pymongo.errors import DuplicateKeyError
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
+
+from app.webhooks.paypal_reconciler import reconcile_paypal_event
 
 from app.models import (
     Decision,
@@ -35,6 +42,10 @@ from app.models.execution import (
     ExecutionRecord,
 )
 from app.models.verification import (
+    GATEWAY_VERIFIED,
+    MANUAL_CONFIRMATION_CHANNEL,
+    MANUAL_SOURCE,
+    MERCHANT_ASSERTED,
     ManualVerification,
     WebhookVerification,
     verification_document,
@@ -243,7 +254,7 @@ def test_step1_models() -> None:
         f"assertion={wv_rzp.assertion!r}, gateway={wv_rzp.gateway!r}",
     )
 
-    # 1.8 WebhookVerification validates PayPal webhook without Razorpay IDs
+    # 1.8 WebhookVerification validates PayPal webhook with PayPal event identifiers
     wv_pp = WebhookVerification(
         event_id="evt_pp_1",
         execution_id="507f1f77bcf86cd799439014",
@@ -252,6 +263,8 @@ def test_step1_models() -> None:
         assertion="gateway_verified",
         gateway="paypal",
         gateway_ref="CAPTURE-123",
+        paypal_event_id="WH-TEST-CAPTURE-123",
+        paypal_event="PAYMENT.CAPTURE.COMPLETED",
         amount_recovered=50.0,
         amount_expected=50.0,
         amount_mismatch=False,
@@ -259,7 +272,11 @@ def test_step1_models() -> None:
     )
     report(
         "WebhookVerification validates PayPal webhook with gateway='paypal'",
-        wv_pp.gateway == "paypal" and wv_pp.gateway_ref == "CAPTURE-123" and wv_pp.razorpay_event_id is None,
+        wv_pp.gateway == "paypal"
+        and wv_pp.gateway_ref == "CAPTURE-123"
+        and wv_pp.paypal_event_id == "WH-TEST-CAPTURE-123"
+        and wv_pp.paypal_event == "PAYMENT.CAPTURE.COMPLETED"
+        and wv_pp.razorpay_event_id is None,
         f"gateway={wv_pp.gateway!r}, ref={wv_pp.gateway_ref!r}",
     )
 
@@ -1010,6 +1027,643 @@ def test_step3_execution_port_and_adapters() -> None:
     asyncio.run(run_razorpay_compat_test())
 
 
+# =============================================================================
+# SECTION 5: PAYPAL WEBHOOK RECONCILIATION CONTRACT CHECKS (OFFLINE)
+# =============================================================================
+
+
+class _MockMongoCollection:
+    def __init__(self, name: str):
+        self.name = name
+        self.docs: list[dict[str, Any]] = []
+
+    def _matches(self, doc: dict[str, Any], query: dict[str, Any]) -> bool:
+        for k, v in query.items():
+            doc_val = doc.get(k)
+            if isinstance(v, dict):
+                if "$in" in v:
+                    if doc_val not in v["$in"]:
+                        return False
+                elif "$exists" in v:
+                    if (k in doc) != v["$exists"]:
+                        return False
+            else:
+                if doc_val != v:
+                    return False
+        return True
+
+    async def find_one(self, query: dict[str, Any], projection: dict[str, Any] | None = None) -> dict[str, Any] | None:
+        for doc in self.docs:
+            if self._matches(doc, query):
+                return dict(doc)
+        return None
+
+    async def insert_one(self, doc: dict[str, Any]) -> Any:
+        if doc.get("paypal_event_id"):
+            for d in self.docs:
+                if d.get("paypal_event_id") == doc["paypal_event_id"]:
+                    raise DuplicateKeyError(f"E11000 duplicate key error on {self.name}.paypal_event_id")
+        d = dict(doc)
+        if "_id" not in d:
+            d["_id"] = ObjectId()
+        self.docs.append(d)
+        class _InsertRes:
+            inserted_id = d["_id"]
+        return _InsertRes()
+
+    async def update_one(self, query: dict[str, Any], update: dict[str, Any]) -> Any:
+        for doc in self.docs:
+            if self._matches(doc, query):
+                if "$set" in update:
+                    doc.update(update["$set"])
+                class _UpdateRes:
+                    matched_count = 1
+                    modified_count = 1
+                return _UpdateRes()
+        class _UpdateResZero:
+            matched_count = 0
+            modified_count = 0
+        return _UpdateResZero()
+
+
+class _MockMongoDB:
+    def __init__(self):
+        self.verifications = _MockMongoCollection("verifications")
+        self.executions = _MockMongoCollection("executions")
+        self.events = _MockMongoCollection("events")
+        self.policy_verdicts = _MockMongoCollection("policy_verdicts")
+        self.decisions = _MockMongoCollection("decisions")
+
+    async def list_collection_names(self) -> list[str]:
+        return ["verifications", "executions", "events", "policy_verdicts", "decisions"]
+
+
+def test_step5_paypal_reconciliation() -> None:
+    print("\n--- SECTION 5: PAYPAL WEBHOOK RECONCILIATION CONTRACT CHECKS ---")
+    fixtures_dir = ROOT / "tests" / "fixtures" / "paypal"
+
+    # 5.1 Fixture validation
+    fixture_files = [
+        "payment_capture_completed.json",
+        "payment_capture_declined.json",
+        "invoicing_invoice_paid_partial.json",
+        "invoicing_invoice_paid_full.json",
+        "invoicing_invoice_paid_external.json",
+        "invoicing_invoice_created.json",
+        "invoicing_invoice_sent.json",
+        "vault_payment_token_created.json",
+    ]
+    fixtures: dict[str, dict[str, Any]] = {}
+    for f in fixture_files:
+        p = fixtures_dir / f
+        if p.exists():
+            fixtures[f] = json.loads(p.read_text(encoding="utf-8"))
+        else:
+            fixtures[f] = {}
+
+    all_fixtures_present = all(len(fixtures[f]) > 0 for f in fixture_files)
+    report(
+        "5.1 Fixture loading: all 8 PayPal fixtures load valid JSON from tests/fixtures/paypal/",
+        all_fixtures_present,
+        f"loaded {len([f for f in fixture_files if len(fixtures[f]) > 0])}/8 fixtures",
+    )
+
+    # 5.1b Fixture provenance: captured fixtures match recorded original payload SHA-256
+    captured_hashes_valid = True
+    hash_details: list[str] = []
+    for f in fixture_files:
+        data = fixtures.get(f, {})
+        if data.get("source") == "captured":
+            recorded_hash = data.get("original_payload_sha256")
+            clean = {k: v for k, v in data.items() if k not in ("source", "original_payload_sha256")}
+            actual_hash = hashlib.sha256(json.dumps(clean, sort_keys=True).encode("utf-8")).hexdigest()
+            if not recorded_hash or actual_hash != recorded_hash:
+                captured_hashes_valid = False
+                hash_details.append(f"{f}: expected {recorded_hash}, got {actual_hash}")
+            else:
+                hash_details.append(f"{f}: OK ({actual_hash[:8]}...)")
+    report(
+        "5.1b Fixture provenance: captured PayPal fixtures match recorded original payload SHA-256",
+        captured_hashes_valid and len(hash_details) > 0,
+        "; ".join(hash_details),
+    )
+
+    async def run_reconciliation_tests() -> None:
+        # 5.2 PAYMENT.CAPTURE.COMPLETED single reconcile
+        db_cap = _MockMongoDB()
+        fix_cap = fixtures["payment_capture_completed.json"]
+        db_cap.executions.docs.append({
+            "_id": ObjectId("507f1f77bcf86cd799439001"),
+            "gateway": "paypal",
+            "gateway_ref": "46969136VC639191U",
+            "event_id": "evt_paypal_order_capture_01",
+            "amount": 25.0,
+        })
+        db_cap.events.docs.append({
+            "event_id": "evt_paypal_order_capture_01",
+            "amount": 25.0,
+            "status": "at_risk",
+        })
+
+        r1 = await reconcile_paypal_event(fix_cap, db_cap)
+        rec_verif = db_cap.verifications.docs[0] if db_cap.verifications.docs else {}
+        cap_ok = (
+            r1.processed is True
+            and r1.matched is True
+            and r1.duplicate is False
+            and r1.outcome == "recovered"
+            and r1.assertion == "gateway_verified"
+            and r1.amount_recovered == 25.0
+            and db_cap.events.docs[0]["status"] == "recovered"
+            and rec_verif.get("paypal_event_id") == fix_cap["id"]
+            and rec_verif.get("paypal_event") == "PAYMENT.CAPTURE.COMPLETED"
+        )
+        report(
+            "5.2 PAYMENT.CAPTURE.COMPLETED: reconciles once (gateway_verified, recovered, transitions event status)",
+            cap_ok,
+            f"assertion={r1.assertion}, outcome={r1.outcome}, status={db_cap.events.docs[0]['status']}",
+        )
+
+        # 5.3 PAYMENT.CAPTURE.COMPLETED replay
+        r2 = await reconcile_paypal_event(fix_cap, db_cap)
+        rep_cap_ok = (
+            r2.processed is True
+            and r2.matched is True
+            and r2.duplicate is True
+            and r2.verification_id == r1.verification_id
+            and len(db_cap.verifications.docs) == 1
+        )
+        report(
+            "5.3 PAYMENT.CAPTURE.COMPLETED replay: duplicate detected, returns existing verification, no duplicate DB record",
+            rep_cap_ok,
+            f"duplicate={r2.duplicate}, verif_count={len(db_cap.verifications.docs)}",
+        )
+
+        # 5.4 INVOICING.INVOICE.PAID (partial)
+        db_part = _MockMongoDB()
+        fix_part = fixtures["invoicing_invoice_paid_partial.json"]
+        db_part.executions.docs.append({
+            "_id": ObjectId("507f1f77bcf86cd799439002"),
+            "gateway": "paypal",
+            "gateway_ref": "INV2-LSEJ-2LLG-D59L-2QNU",
+            "event_id": "evt_paypal_inv_partial",
+            "amount": 100.0,
+        })
+        db_part.events.docs.append({
+            "event_id": "evt_paypal_inv_partial",
+            "amount": 100.0,
+            "status": "at_risk",
+        })
+
+        rp1 = await reconcile_paypal_event(fix_part, db_part)
+        part_verif = db_part.verifications.docs[0] if db_part.verifications.docs else {}
+        part_ok = (
+            rp1.processed is True
+            and rp1.matched is True
+            and rp1.duplicate is False
+            and rp1.assertion == "gateway_verified"
+            and rp1.amount_recovered == 10.0
+            and part_verif.get("amount_mismatch") is True
+            and db_part.events.docs[0]["status"] == "at_risk"  # left open
+        )
+        report(
+            "5.4 INVOICING.INVOICE.PAID (partial): classified as gateway_verified, amount_mismatch=True, event left open",
+            part_ok,
+            f"assertion={rp1.assertion}, amount={rp1.amount_recovered}, mismatch={part_verif.get('amount_mismatch')}, event_status={db_part.events.docs[0]['status']}",
+        )
+
+        # 5.5 INVOICING.INVOICE.PAID (partial) replay
+        rp2 = await reconcile_paypal_event(fix_part, db_part)
+        rep_part_ok = (
+            rp2.processed is True
+            and rp2.matched is True
+            and rp2.duplicate is True
+            and rp2.verification_id == rp1.verification_id
+            and len(db_part.verifications.docs) == 1
+        )
+        report(
+            "5.5 INVOICING.INVOICE.PAID (partial) replay: duplicate detected, returns existing verification, no duplicate DB record",
+            rep_part_ok,
+            f"duplicate={rp2.duplicate}, verif_count={len(db_part.verifications.docs)}",
+        )
+
+        # 5.6 INVOICING.INVOICE.PAID (full)
+        db_full = _MockMongoDB()
+        fix_full = fixtures["invoicing_invoice_paid_full.json"]
+        db_full.executions.docs.append({
+            "_id": ObjectId("507f1f77bcf86cd799439003"),
+            "gateway": "paypal",
+            "gateway_ref": "INV2-LSEJ-2LLG-D59L-2QNU",
+            "event_id": "evt_paypal_inv_full",
+            "amount": 100.0,
+        })
+        db_full.events.docs.append({
+            "event_id": "evt_paypal_inv_full",
+            "amount": 100.0,
+            "status": "at_risk",
+        })
+
+        rf1 = await reconcile_paypal_event(fix_full, db_full)
+        full_verif = db_full.verifications.docs[0] if db_full.verifications.docs else {}
+        full_ok = (
+            rf1.processed is True
+            and rf1.matched is True
+            and rf1.duplicate is False
+            and rf1.assertion == "gateway_verified"
+            and rf1.outcome == "recovered"
+            and rf1.amount_recovered == 90.0
+            and db_full.events.docs[0]["status"] == "recovered"
+            and full_verif.get("paypal_event") == "INVOICING.INVOICE.PAID"
+        )
+        report(
+            "5.6 INVOICING.INVOICE.PAID (full): classified as gateway_verified, recovered outcome, transitions event status",
+            full_ok,
+            f"assertion={rf1.assertion}, outcome={rf1.outcome}, status={db_full.events.docs[0]['status']}",
+        )
+
+        # 5.7 INVOICING.INVOICE.PAID (full) replay
+        rf2 = await reconcile_paypal_event(fix_full, db_full)
+        rep_full_ok = (
+            rf2.processed is True
+            and rf2.matched is True
+            and rf2.duplicate is True
+            and len(db_full.verifications.docs) == 1
+        )
+        report(
+            "5.7 INVOICING.INVOICE.PAID (full) replay: duplicate detected, returns existing verification, no duplicate DB record",
+            rep_full_ok,
+            f"duplicate={rf2.duplicate}, verif_count={len(db_full.verifications.docs)}",
+        )
+
+        # 5.8 INVOICING.INVOICE.PAID (external recorded payment)
+        db_ext = _MockMongoDB()
+        fix_ext = fixtures["invoicing_invoice_paid_external.json"]
+        db_ext.executions.docs.append({
+            "_id": ObjectId("507f1f77bcf86cd799439004"),
+            "gateway": "paypal",
+            "gateway_ref": "INV2-LSEJ-2LLG-D59L-2QNU",
+            "event_id": "evt_paypal_inv_ext",
+            "amount": 100.0,
+        })
+        db_ext.events.docs.append({
+            "event_id": "evt_paypal_inv_ext",
+            "amount": 100.0,
+            "status": "at_risk",
+        })
+
+        re1 = await reconcile_paypal_event(fix_ext, db_ext)
+        ext_verif = db_ext.verifications.docs[0] if db_ext.verifications.docs else {}
+        ext_ok = (
+            re1.processed is True
+            and re1.matched is True
+            and re1.duplicate is False
+            and re1.assertion == "merchant_asserted"
+            and re1.outcome == "recovered"
+            and re1.amount_recovered == 100.0
+            and db_ext.events.docs[0]["status"] == "recovered"
+            and ext_verif.get("assertion") == "merchant_asserted"
+        )
+        report(
+            "5.8 INVOICING.INVOICE.PAID (external): classified as merchant_asserted (EXTERNAL tx), recovered outcome",
+            ext_ok,
+            f"assertion={re1.assertion}, outcome={re1.outcome}, status={db_ext.events.docs[0]['status']}",
+        )
+
+        # 5.9 INVOICING.INVOICE.PAID (external) replay
+        re2 = await reconcile_paypal_event(fix_ext, db_ext)
+        rep_ext_ok = (
+            re2.processed is True
+            and re2.matched is True
+            and re2.duplicate is True
+            and len(db_ext.verifications.docs) == 1
+        )
+        report(
+            "5.9 INVOICING.INVOICE.PAID (external) replay: duplicate detected, returns existing verification, no duplicate DB record",
+            rep_ext_ok,
+            f"duplicate={re2.duplicate}, verif_count={len(db_ext.verifications.docs)}",
+        )
+
+        # 5.10 Unmatched capture acknowledged without verification record
+        db_unmatched = _MockMongoDB()
+        unmatched_event = json.loads(json.dumps(fix_cap))
+        unmatched_event["id"] = "WH-UNMATCHED-CAPTURE-999"
+        unmatched_event["resource"]["custom_id"] = "ev:evt_unknown_missing"
+        unmatched_event["resource"]["supplementary_data"]["related_ids"]["order_id"] = "ORDER_UNKNOWN_MISSING"
+
+        ru = await reconcile_paypal_event(unmatched_event, db_unmatched)
+        unmatched_ok = (
+            ru.processed is False
+            and ru.matched is False
+            and ru.duplicate is False
+            and len(db_unmatched.verifications.docs) == 0
+        )
+        report(
+            "5.10 Unmatched capture: acknowledged with processed=False, matched=False, 0 verifications created in DB",
+            unmatched_ok,
+            f"processed={ru.processed}, matched={ru.matched}, verif_count={len(db_unmatched.verifications.docs)}",
+        )
+
+        # 5.11 Non-settlement fixtures acknowledge without error
+        non_settlement_files = [
+            "payment_capture_declined.json",
+            "invoicing_invoice_created.json",
+            "invoicing_invoice_sent.json",
+            "vault_payment_token_created.json",
+        ]
+        non_settlement_results = []
+        for nsf in non_settlement_files:
+            ns_res = await reconcile_paypal_event(fixtures[nsf], db_unmatched)
+            non_settlement_results.append(ns_res.processed is False and ns_res.matched is False)
+        all_ns_ok = all(non_settlement_results) and len(db_unmatched.verifications.docs) == 0
+        report(
+            "5.11 Non-settlement fixtures: invoice created/sent, token created, capture declined acknowledge with 0 verifications",
+            all_ns_ok,
+            f"all 4 acknowledged without verifications; total db verifications={len(db_unmatched.verifications.docs)}",
+        )
+
+    asyncio.run(run_reconciliation_tests())
+
+
+def test_step6_razorpay_verifier_characterization() -> None:
+    print("\n--- SECTION 6: RAZORPAY VERIFIER CHARACTERIZATION (OFFLINE) ---")
+
+    # 6.1 gateway razorpay requires razorpay_event_id and razorpay_event
+    rzp_requires_fields = False
+    try:
+        WebhookVerification(
+            event_id="evt_rzp_req_01",
+            execution_id="507f1f77bcf86cd799439011",
+            gateway="razorpay",
+            razorpay_event="payment_link.paid",
+            outcome="recovered",
+            amount_recovered=100.0,
+            amount_expected=100.0,
+            amount_mismatch=False,
+        )
+    except ValidationError:
+        try:
+            WebhookVerification(
+                event_id="evt_rzp_req_02",
+                execution_id="507f1f77bcf86cd799439011",
+                gateway="razorpay",
+                razorpay_event_id="rzp_evt_001",
+                outcome="recovered",
+                amount_recovered=100.0,
+                amount_expected=100.0,
+                amount_mismatch=False,
+            )
+        except ValidationError:
+            rzp_requires_fields = True
+
+    # Also verify paypal requires paypal_event_id and paypal_event without loosening
+    paypal_requires_fields = False
+    try:
+        WebhookVerification(
+            event_id="evt_pp_req_01",
+            execution_id="507f1f77bcf86cd799439011",
+            gateway="paypal",
+            paypal_event="PAYMENT.CAPTURE.COMPLETED",
+            outcome="recovered",
+            amount_recovered=100.0,
+            amount_expected=100.0,
+            amount_mismatch=False,
+        )
+    except ValidationError:
+        try:
+            WebhookVerification(
+                event_id="evt_pp_req_02",
+                execution_id="507f1f77bcf86cd799439011",
+                gateway="paypal",
+                paypal_event_id="WH-TEST-001",
+                outcome="recovered",
+                amount_recovered=100.0,
+                amount_expected=100.0,
+                amount_mismatch=False,
+            )
+        except ValidationError:
+            paypal_requires_fields = True
+
+    report(
+        "6.1 Gateway field requirements: razorpay requires razorpay_event_id & razorpay_event; paypal requires paypal_event_id & paypal_event",
+        rzp_requires_fields and paypal_requires_fields,
+        f"razorpay_strict={rzp_requires_fields}, paypal_strict={paypal_requires_fields}",
+    )
+
+    # 6.2 payment_link.paid -> recovered with matching money
+    paid_ok = False
+    try:
+        wv_paid = WebhookVerification(
+            event_id="evt_rzp_paid",
+            execution_id="507f1f77bcf86cd799439012",
+            gateway="razorpay",
+            razorpay_event_id="rzp_evt_paid_001",
+            razorpay_event="payment_link.paid",
+            outcome="recovered",
+            amount_recovered=500.0,
+            amount_expected=500.0,
+            amount_mismatch=False,
+        )
+        try:
+            WebhookVerification(
+                event_id="evt_rzp_paid_zero",
+                execution_id="507f1f77bcf86cd799439012",
+                gateway="razorpay",
+                razorpay_event_id="rzp_evt_paid_002",
+                razorpay_event="payment_link.paid",
+                outcome="recovered",
+                amount_recovered=0.0,
+                amount_expected=500.0,
+                amount_mismatch=True,
+            )
+            zero_rejected = False
+        except ValidationError:
+            zero_rejected = True
+        paid_ok = (
+            wv_paid.outcome == "recovered"
+            and wv_paid.amount_recovered == 500.0
+            and wv_paid.assertion == GATEWAY_VERIFIED
+            and zero_rejected
+        )
+    except Exception:
+        paid_ok = False
+    report(
+        "6.2 payment_link.paid: derives outcome 'recovered' with matching money, rejects recovery of 0",
+        paid_ok,
+        f"outcome=recovered, money matched, zero rejected={paid_ok}",
+    )
+
+    # 6.3 payment_link.expired and payment_link.cancelled outcomes
+    exp_canc_ok = False
+    try:
+        wv_exp = WebhookVerification(
+            event_id="evt_rzp_exp",
+            execution_id="507f1f77bcf86cd799439013",
+            gateway="razorpay",
+            razorpay_event_id="rzp_evt_exp_001",
+            razorpay_event="payment_link.expired",
+            outcome="expired",
+            amount_recovered=0.0,
+            amount_expected=500.0,
+            amount_mismatch=False,
+        )
+        wv_canc = WebhookVerification(
+            event_id="evt_rzp_canc",
+            execution_id="507f1f77bcf86cd799439014",
+            gateway="razorpay",
+            razorpay_event_id="rzp_evt_canc_001",
+            razorpay_event="payment_link.cancelled",
+            outcome="cancelled",
+            amount_recovered=0.0,
+            amount_expected=500.0,
+            amount_mismatch=False,
+        )
+        try:
+            WebhookVerification(
+                event_id="evt_rzp_exp_money",
+                execution_id="507f1f77bcf86cd799439013",
+                gateway="razorpay",
+                razorpay_event_id="rzp_evt_exp_002",
+                razorpay_event="payment_link.expired",
+                outcome="expired",
+                amount_recovered=100.0,
+                amount_expected=500.0,
+                amount_mismatch=True,
+            )
+            nonzero_exp_rejected = False
+        except ValidationError:
+            nonzero_exp_rejected = True
+        exp_canc_ok = (
+            wv_exp.outcome == "expired"
+            and wv_canc.outcome == "cancelled"
+            and nonzero_exp_rejected
+        )
+    except Exception:
+        exp_canc_ok = False
+    report(
+        "6.3 Expired and cancelled outcomes: amount_recovered must be 0.0, non-zero money rejected",
+        exp_canc_ok,
+        f"expired and cancelled validated, non-zero money rejected={exp_canc_ok}",
+    )
+
+    # 6.4 Mismatched event/outcome is rejected
+    mismatch_rejected = False
+    try:
+        WebhookVerification(
+            event_id="evt_rzp_mismatch",
+            execution_id="507f1f77bcf86cd799439015",
+            gateway="razorpay",
+            razorpay_event_id="rzp_evt_mis_001",
+            razorpay_event="payment_link.paid",
+            outcome="expired",
+            amount_recovered=0.0,
+            amount_expected=500.0,
+            amount_mismatch=False,
+        )
+    except ValidationError:
+        try:
+            WebhookVerification(
+                event_id="evt_rzp_mismatch2",
+                execution_id="507f1f77bcf86cd799439015",
+                gateway="razorpay",
+                razorpay_event_id="rzp_evt_mis_002",
+                razorpay_event="payment_link.cancelled",
+                outcome="recovered",
+                amount_recovered=500.0,
+                amount_expected=500.0,
+                amount_mismatch=False,
+            )
+        except ValidationError:
+            mismatch_rejected = True
+    report(
+        "6.4 Mismatched event/outcome: paid with outcome=expired and cancelled with outcome=recovered are rejected",
+        mismatch_rejected,
+        f"mismatched outcomes rejected={mismatch_rejected}",
+    )
+
+    # 6.5 Amount-mismatch invariants
+    mismatch_invariants_ok = False
+    try:
+        try:
+            WebhookVerification(
+                event_id="evt_rzp_diff",
+                execution_id="507f1f77bcf86cd799439016",
+                gateway="razorpay",
+                razorpay_event_id="rzp_evt_diff_001",
+                razorpay_event="payment_link.paid",
+                outcome="recovered",
+                amount_recovered=400.0,
+                amount_expected=500.0,
+                amount_mismatch=False,
+            )
+            lie_rejected = False
+        except ValidationError:
+            lie_rejected = True
+
+        try:
+            WebhookVerification(
+                event_id="evt_rzp_match",
+                execution_id="507f1f77bcf86cd799439017",
+                gateway="razorpay",
+                razorpay_event_id="rzp_evt_match_001",
+                razorpay_event="payment_link.paid",
+                outcome="recovered",
+                amount_recovered=500.0,
+                amount_expected=500.0,
+                amount_mismatch=True,
+            )
+            false_mismatch_rejected = False
+        except ValidationError:
+            false_mismatch_rejected = True
+
+        wv_valid_mismatch = WebhookVerification(
+            event_id="evt_rzp_valid_diff",
+            execution_id="507f1f77bcf86cd799439018",
+            gateway="razorpay",
+            razorpay_event_id="rzp_evt_diff_002",
+            razorpay_event="payment_link.paid",
+            outcome="recovered",
+            amount_recovered=400.0,
+            amount_expected=500.0,
+            amount_mismatch=True,
+        )
+        mismatch_invariants_ok = (
+            lie_rejected and false_mismatch_rejected and wv_valid_mismatch.amount_mismatch is True
+        )
+    except Exception:
+        mismatch_invariants_ok = False
+    report(
+        "6.5 Amount-mismatch invariants: re-derived strictly; false mismatch and false match both rejected",
+        mismatch_invariants_ok,
+        f"invariants enforced={mismatch_invariants_ok}",
+    )
+
+    # 6.6 Manual confirmations stay merchant_asserted
+    manual_ok = False
+    try:
+        mv = ManualVerification(
+            event_id="evt_manual_01",
+            execution_id="507f1f77bcf86cd799439019",
+            confirmation_id="manual_conf_507f1f77bcf86cd799439019",
+            confirmed_by=MANUAL_CONFIRMATION_CHANNEL,
+            amount_recovered=250.0,
+            amount_expected=250.0,
+            amount_mismatch=False,
+        )
+        manual_ok = (
+            mv.assertion == MERCHANT_ASSERTED
+            and mv.source == MANUAL_SOURCE
+            and mv.outcome == "recovered"
+            and mv.confirmation_id == "manual_conf_507f1f77bcf86cd799439019"
+        )
+    except Exception:
+        manual_ok = False
+    report(
+        "6.6 Manual confirmations: pinned to source=manual_confirmation, assertion=merchant_asserted, channel=merchant_via_api",
+        manual_ok,
+        f"assertion={getattr(mv, 'assertion', None)}, source={getattr(mv, 'source', None)}",
+    )
+
+
 def main() -> int:
     print("=" * 78)
     print("PHASE 1 CONTRACT CHECKS (OFFLINE — NO NETWORK, NO DB, NO SERVER)")
@@ -1019,6 +1673,8 @@ def main() -> int:
     test_characterization_razorpay_execution()
     test_step2_rulebook_and_policy()
     test_step3_execution_port_and_adapters()
+    test_step5_paypal_reconciliation()
+    test_step6_razorpay_verifier_characterization()
 
     print("\n" + "=" * 78)
     print(f"SUMMARY: {PASS_COUNT} PASSED, {FAIL_COUNT} FAILED")

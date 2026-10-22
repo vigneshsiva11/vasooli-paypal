@@ -93,13 +93,24 @@ async def main() -> int:
     print("=" * 78)
 
     # ---- raw reads, once ---------------------------------------------------
-    verifications = [document async for document in db.verifications.find({})]
+    target_currency = settings.default_currency or "INR"
+    all_events = [document async for document in db.events.find({})]
     events = {
-        document["event_id"]: document async for document in db.events.find({})
+        document["event_id"]: document
+        for document in all_events
+        if document.get("currency", "INR") == target_currency
     }
+    valid_event_ids = set(events.keys())
     executions = {
-        str(document["_id"]): document async for document in db.executions.find({})
+        str(document["_id"]): document
+        async for document in db.executions.find({})
+        if document.get("event_id") in valid_event_ids
     }
+    verifications = [
+        document
+        async for document in db.verifications.find({})
+        if document.get("event_id") in valid_event_ids
+    ]
 
     manual_docs = [d for d in verifications if d.get("source") == MANUAL_SOURCE]
     legacy_docs = [d for d in verifications if "source" not in d]

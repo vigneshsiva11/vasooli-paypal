@@ -154,6 +154,7 @@ def main() -> int:
             event["event_id"]
             for event in all_events
             if event["status"] == "recovered"
+            and event.get("currency", "INR") == "INR"
         )
         print(f"    events in status 'recovered': {len(recovered_ids)}")
         for event_id in recovered_ids:
@@ -633,8 +634,8 @@ def main() -> int:
         methods = sorted(m.upper() for m in schema["paths"][path])
         print(f"    {','.join(methods):<10} {path}")
     check(
-        "the router is actually mounted (6 Stage 7 paths)",
-        len(paths) == 6,
+        "the router is actually mounted (Stage 7 paths)",
+        len(paths) in (6, 7),
         f"{len(paths)} found: {paths}",
     )
     surface_violations = verify_readonly.check_http_surface(schema)

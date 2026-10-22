@@ -92,6 +92,19 @@ OUTCOME_FOR_EVENT: dict[str, str] = {
     "payment_link.cancelled": "cancelled",
 }
 
+#: PayPal webhook events for verification.
+PayPalWebhookEvent = Literal[
+    "PAYMENT.CAPTURE.COMPLETED",
+    "INVOICING.INVOICE.PAID",
+    "PAYMENT.CAPTURE.DECLINED",
+]
+
+OUTCOME_FOR_PAYPAL_EVENT: dict[str, str] = {
+    "PAYMENT.CAPTURE.COMPLETED": "recovered",
+    "INVOICING.INVOICE.PAID": "recovered",
+    "PAYMENT.CAPTURE.DECLINED": "not_recovered",
+}
+
 #: The one outcome that means money moved.
 RECOVERED_OUTCOME = "recovered"
 
@@ -417,18 +430,32 @@ class WebhookVerification(VerificationBase):
             "execution's own recorded link id at write time rather than trusted."
         ),
     )
+    paypal_event_id: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=100,
+        description="PayPal webhook event ID.",
+    )
+    paypal_event: PayPalWebhookEvent | None = Field(
+        default=None,
+        description="The event name PayPal sent. Determines `outcome`.",
+    )
 
     @model_validator(mode="after")
-    def _outcome_must_follow_the_event(self) -> "WebhookVerification":
+    def _gateway_invariants(self) -> "WebhookVerification":
         """The outcome is dictated by the event name, not chosen.
 
-        Without this, a `payment_link.expired` could be stored as `recovered` and
-        the event's status would follow it. The outcome is the one field the whole
-        stage turns on, so it is the one field with no discretion in it.
+        Enforces gateway-specific requirements:
+        - Razorpay: razorpay_event_id and razorpay_event required; outcome must follow OUTCOME_FOR_EVENT.
+        - PayPal: paypal_event_id and paypal_event required; outcome must follow OUTCOME_FOR_PAYPAL_EVENT.
         """
-        if self.razorpay_event is not None:
+        if self.gateway == "razorpay":
+            if not self.razorpay_event_id:
+                raise ValueError("razorpay_event_id is required for razorpay webhooks")
+            if not self.razorpay_event:
+                raise ValueError("razorpay_event is required for razorpay webhooks")
             expected = OUTCOME_FOR_EVENT.get(self.razorpay_event)
-            if expected is None:  # pragma: no cover - the Literal precedes this
+            if expected is None:
                 raise ValueError(
                     f"{self.razorpay_event!r} is not a subscribed event; "
                     "OUTCOME_FOR_EVENT does not say what it would mean"
@@ -436,6 +463,22 @@ class WebhookVerification(VerificationBase):
             if self.outcome != expected:
                 raise ValueError(
                     f"{self.razorpay_event!r} means {expected!r}, not {self.outcome!r}; "
+                    "the outcome is derived from the event and is not a free choice"
+                )
+        elif self.gateway == "paypal":
+            if not self.paypal_event_id:
+                raise ValueError("paypal_event_id is required for paypal webhooks")
+            if not self.paypal_event:
+                raise ValueError("paypal_event is required for paypal webhooks")
+            expected = OUTCOME_FOR_PAYPAL_EVENT.get(self.paypal_event)
+            if expected is None:
+                raise ValueError(
+                    f"{self.paypal_event!r} is not a supported PayPal verification event; "
+                    "OUTCOME_FOR_PAYPAL_EVENT does not say what it would mean"
+                )
+            if self.outcome != expected:
+                raise ValueError(
+                    f"{self.paypal_event!r} means {expected!r}, not {self.outcome!r}; "
                     "the outcome is derived from the event and is not a free choice"
                 )
         return self

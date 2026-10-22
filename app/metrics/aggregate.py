@@ -175,7 +175,7 @@ def summarize(snapshot: Snapshot) -> MetricsSummary:
         total_events_processed=len(decided & set(events_by_id)),
         total_events=len(snapshot.events),
         events_without_decision=len(set(events_by_id) - decided),
-        currencies=sorted({event["currency"] for event in snapshot.events}),
+        currencies=sorted({event.get("currency", "INR") for event in snapshot.events}),
         non_recoverable_at_risk=non_recoverable,
         recovered_verification_records=len(survivors) + duplicates_ignored,
         distinct_recoveries_counted=len(survivors),

@@ -1,0 +1,85 @@
+{
+  "id": "WH-7KV764744U570821M-2AR000173D5884226",
+  "event_version": "1.0",
+  "create_time": "2026-10-15T16:32:00.894Z",
+  "resource_type": "payment_token",
+  "resource_version": "3.0",
+  "event_type": "VAULT.PAYMENT-TOKEN.CREATED",
+  "summary": "A payment token has been created.",
+  "resource": {
+    "owner": {
+      "merchant_id": "FJD79RSJQC7BC"
+    },
+    "update_time": "2026-10-15T16:31:52.912Z",
+    "metadata": {
+      "order_id": "46969136VC639191U"
+    },
+    "create_time": "2026-10-15T16:31:52.912Z",
+    "owner_id": "FJD79RSJQC7BC",
+    "time_created": "2026-10-15T09:31:52.913PDT",
+    "links": [
+      {
+        "href": "https://api.sandbox.paypal.com/v3/vault/payment-tokens/4mr90404j6010301k",
+        "rel": "self",
+        "method": "GET",
+        "encType": "application/json"
+      },
+      {
+        "href": "https://api.sandbox.paypal.com/v3/vault/payment-tokens/4mr90404j6010301k",
+        "rel": "delete",
+        "method": "DELETE",
+        "encType": "application/json"
+      }
+    ],
+    "id": "4mr90404j6010301k",
+    "payment_source": {
+      "card": {
+        "name": "Test Buyer",
+        "last_digits": "1111",
+        "brand": "VISA",
+        "expiry": "2028-12",
+        "billing_address": {
+          "address_line_1": "2211 N First Street",
+          "admin_area_2": "San Jose",
+          "admin_area_1": "CA",
+          "postal_code": "95131",
+          "country_code": "US"
+        },
+        "verification_status": "VERIFIED",
+        "verification": {
+          "amount": {
+            "currency_code": "USD",
+            "value": "0.00"
+          },
+          "processor_response": {
+            "avs_code": "A",
+            "cvv_code": "M",
+            "response_code": "0000"
+          }
+        },
+        "network_transaction_reference": {
+          "id": "271475500990138",
+          "network": "VISA",
+          "time": "2026-10-15T09:31:52Z"
+        }
+      }
+    },
+    "customer": {
+      "id": "nuwAZXaKZY"
+    }
+  },
+  "links": [
+    {
+      "href": "https://api.sandbox.paypal.com/v1/notifications/webhooks-events/WH-7KV764744U570821M-2AR000173D5884226",
+      "rel": "self",
+      "method": "GET"
+    },
+    {
+      "href": "https://api.sandbox.paypal.com/v1/notifications/webhooks-events/WH-7KV764744U570821M-2AR000173D5884226/resend",
+      "rel": "resend",
+      "method": "POST"
+    }
+  ],
+  "source": "captured",
+  "original_payload_sha256": "8233df533cd0370cbecf0bbba7bded0c9a8d171e0591baea4dce4772001ae5ab"
+}

@@ -85,6 +85,8 @@ VERIFIED_INDEX = "event_id_verified_at"
 EXECUTION_INDEX = "execution_id_verified_at"
 #: Stage 9. The manual path's idempotency key, as an index.
 CONFIRMATION_ID_INDEX = "uniq_confirmation_id"
+#: PayPal idempotency key, as an index.
+PAYPAL_EVENT_ID_INDEX = "uniq_paypal_event_id"
 
 #: Restricts each unique index to the records that actually carry its key.
 #:
@@ -95,6 +97,7 @@ CONFIRMATION_ID_INDEX = "uniq_confirmation_id"
 #: existence is the honest predicate.
 RAZORPAY_EVENT_ID_FILTER: dict[str, Any] = {"razorpay_event_id": {"$exists": True}}
 CONFIRMATION_ID_FILTER: dict[str, Any] = {"confirmation_id": {"$exists": True}}
+PAYPAL_EVENT_ID_FILTER: dict[str, Any] = {"paypal_event_id": {"$exists": True}}
 
 
 class VerificationReferenceError(ValueError):
@@ -144,11 +147,13 @@ class DuplicateVerification(RuntimeError):
     def __init__(self, existing: dict[str, Any]) -> None:
         self.existing = existing
         razorpay_event_id = existing.get("razorpay_event_id")
-        label = (
-            f"Razorpay event {razorpay_event_id}"
-            if razorpay_event_id
-            else f"confirmation {existing.get('confirmation_id')}"
-        )
+        paypal_event_id = existing.get("paypal_event_id")
+        if razorpay_event_id:
+            label = f"Razorpay event {razorpay_event_id}"
+        elif paypal_event_id:
+            label = f"PayPal event {paypal_event_id}"
+        else:
+            label = f"confirmation {existing.get('confirmation_id')}"
         super().__init__(
             f"{label} has already been recorded "
             f"({existing.get('outcome')} at {existing.get('verified_at')})"
@@ -262,12 +267,19 @@ async def ensure_indexes() -> None:
         name=CONFIRMATION_ID_INDEX,
         partialFilterExpression=CONFIRMATION_ID_FILTER,
     )
+    await collection().create_index(
+        [("paypal_event_id", ASCENDING)],
+        unique=True,
+        name=PAYPAL_EVENT_ID_INDEX,
+        partialFilterExpression=PAYPAL_EVENT_ID_FILTER,
+    )
     logger.info(
-        "Ensured indexes %r/%r/%r/%r on %s%s",
+        "Ensured indexes %r/%r/%r/%r/%r on %s%s",
         EVENT_ID_INDEX,
         VERIFIED_INDEX,
         EXECUTION_INDEX,
         CONFIRMATION_ID_INDEX,
+        PAYPAL_EVENT_ID_INDEX,
         COLLECTION_NAME,
         " (rebuilt the Razorpay key index as partial)" if migrated else "",
     )
@@ -297,6 +309,11 @@ async def find_execution_by_link_id(link_id: str) -> dict[str, Any] | None:
 async def find_by_razorpay_event_id(razorpay_event_id: str) -> dict[str, Any] | None:
     """Return the verification recorded for a Razorpay event id, or None."""
     return await collection().find_one({"razorpay_event_id": razorpay_event_id})
+
+
+async def find_by_paypal_event_id(paypal_event_id: str) -> dict[str, Any] | None:
+    """Return the verification recorded for a PayPal event id, or None."""
+    return await collection().find_one({"paypal_event_id": paypal_event_id})
 
 
 async def find_by_confirmation_id(confirmation_id: str) -> dict[str, Any] | None:
@@ -356,7 +373,14 @@ async def _assert_execution_matches(record: VerificationRecord) -> None:
 
     document = await get_database()[EXECUTION_COLLECTION].find_one(
         {"_id": object_id},
-        {"event_id": 1, "razorpay_payment_link_id": 1, "status": 1, "action_type": 1},
+        {
+            "event_id": 1,
+            "razorpay_payment_link_id": 1,
+            "gateway": 1,
+            "gateway_ref": 1,
+            "status": 1,
+            "action_type": 1,
+        },
     )
     if document is None:
         raise DanglingExecutionReference(
@@ -370,6 +394,15 @@ async def _assert_execution_matches(record: VerificationRecord) -> None:
         )
 
     if record.source == WEBHOOK_SOURCE:
+        if record.gateway == "paypal":
+            stored_ref = document.get("gateway_ref")
+            if record.gateway_ref and stored_ref and stored_ref != record.gateway_ref:
+                raise LinkMismatch(
+                    f"Execution {record.execution_id!r} has gateway_ref {stored_ref!r}, but "
+                    f"this verification reports on {record.gateway_ref!r}; "
+                    "refusing to attribute one action's outcome to another"
+                )
+            return
         stored_link = document.get("razorpay_payment_link_id")
         if stored_link != record.razorpay_payment_link_id:
             raise LinkMismatch(
@@ -409,7 +442,7 @@ async def insert(record: VerificationRecord) -> str:
 
     Raises:
         VerificationReferenceError: any subclass, if the guard refuses.
-        DuplicateVerification: if this Razorpay event, or this execution's one
+        DuplicateVerification: if this Razorpay/PayPal event, or this execution's one
             permitted confirmation, is already recorded.
     """
     await _assert_execution_matches(record)
@@ -417,18 +450,24 @@ async def insert(record: VerificationRecord) -> str:
     try:
         result = await collection().insert_one(record.model_dump())
     except DuplicateKeyError:
-        existing = (
-            await find_by_razorpay_event_id(record.razorpay_event_id)
-            if record.source == WEBHOOK_SOURCE
-            else await find_by_confirmation_id(record.confirmation_id)
-        )
+        if record.source == WEBHOOK_SOURCE:
+            existing = (
+                await find_by_paypal_event_id(record.paypal_event_id)
+                if record.gateway == "paypal"
+                else await find_by_razorpay_event_id(record.razorpay_event_id)
+            )
+        else:
+            existing = await find_by_confirmation_id(record.confirmation_id)
         if existing is None:  # pragma: no cover - would mean the index lied
             raise
+        ev_key = (
+            (record.paypal_event_id if record.gateway == "paypal" else record.razorpay_event_id)
+            if record.source == WEBHOOK_SOURCE
+            else record.confirmation_id
+        )
         logger.warning(
             "Verification for %s lost the insert race; returning the record that won",
-            record.razorpay_event_id
-            if record.source == WEBHOOK_SOURCE
-            else record.confirmation_id,
+            ev_key,
         )
         raise DuplicateVerification(existing) from None
 

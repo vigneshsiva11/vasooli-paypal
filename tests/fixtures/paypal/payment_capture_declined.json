@@ -1,0 +1,82 @@
+{
+  "id": "WH-8W041356MT580963L-8BV492892A3222823",
+  "event_version": "1.0",
+  "create_time": "2026-10-15T16:32:03.434Z",
+  "resource_type": "capture",
+  "resource_version": "2.0",
+  "event_type": "PAYMENT.CAPTURE.DECLINED",
+  "summary": "A payment capture for $ 10.0 USD was declined.",
+  "resource": {
+    "id": "59185726VV0844043",
+    "amount": {
+      "currency_code": "USD",
+      "value": "10.00"
+    },
+    "final_capture": true,
+    "seller_protection": {
+      "status": "NOT_ELIGIBLE"
+    },
+    "seller_receivable_breakdown": {
+      "gross_amount": {
+        "currency_code": "USD",
+        "value": "10.00"
+      },
+      "paypal_fee": {
+        "currency_code": "USD",
+        "value": "0.75"
+      },
+      "net_amount": {
+        "currency_code": "USD",
+        "value": "9.25"
+      }
+    },
+    "status": "DECLINED",
+    "processor_response": {
+      "avs_code": "G",
+      "cvv_code": "P",
+      "response_code": "5120"
+    },
+    "supplementary_data": {
+      "related_ids": {
+        "order_id": "6PW329308U6154049"
+      }
+    },
+    "payee": {
+      "email_address": "sb-n3vd953304200@business.example.com",
+      "merchant_id": "FJD79RSJQC7BC"
+    },
+    "create_time": "2026-10-15T16:31:58Z",
+    "update_time": "2026-10-15T16:31:58Z",
+    "links": [
+      {
+        "href": "https://api.sandbox.paypal.com/v2/payments/captures/59185726VV0844043",
+        "rel": "self",
+        "method": "GET"
+      },
+      {
+        "href": "https://api.sandbox.paypal.com/v2/checkout/orders/6PW329308U6154049",
+        "rel": "up",
+        "method": "GET"
+      }
+    ],
+    "network_transaction_reference": {
+      "id": "000000000000000",
+      "date": "0203",
+      "network": "VISA"
+    }
+  },
+  "links": [
+    {
+      "href": "https://api.sandbox.paypal.com/v1/notifications/webhooks-events/WH-8W041356MT580963L-8BV492892A3222823",
+      "rel": "self",
+      "method": "GET"
+    },
+    {
+      "href": "https://api.sandbox.paypal.com/v1/notifications/webhooks-events/WH-8W041356MT580963L-8BV492892A3222823/resend",
+      "rel": "resend",
+      "method": "POST"
+    }
+  ],
+  "source": "captured",
+  "original_payload_sha256": "78c6294db6d98d7da2036ac757a196d3811a639633bf132398f5126d974da970"
+}

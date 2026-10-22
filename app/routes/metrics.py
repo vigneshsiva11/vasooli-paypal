@@ -13,12 +13,14 @@ OpenAPI schema, so the claim in this docstring is tested rather than trusted.
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from app import metrics
+from app.config import get_settings
 from app.models.metrics import (
     AuditTrail,
     BaselineComparison,
+    CurrencyCount,
     InterventionMetrics,
     MetricsSummary,
     PromiseMetrics,
@@ -33,17 +35,38 @@ router = APIRouter(
 
 
 @router.get(
+    "/metrics/currencies",
+    response_model=list[CurrencyCount],
+    summary="Currencies present with event counts",
+)
+async def metrics_currencies() -> list[CurrencyCount]:
+    """List every currency present in stored events with its event count."""
+    snapshot = await metrics.load_snapshot()
+    counts: dict[str, int] = {}
+    for ev in snapshot.events:
+        c = ev.get("currency", "INR")
+        counts[c] = counts.get(c, 0) + 1
+    return [
+        CurrencyCount(currency=c, count=n)
+        for c, n in sorted(counts.items())
+    ]
+
+
+@router.get(
     "/metrics/summary",
     response_model=MetricsSummary,
     summary="Headline revenue-at-risk and recovery figures",
 )
-async def metrics_summary() -> MetricsSummary:
+async def metrics_summary(
+    currency: str | None = Query(default=None, description="Currency filter"),
+) -> MetricsSummary:
     """Compute the headline recovery numbers live.
 
     Nothing here is cached or stored, so two calls a second apart can legitimately
     differ if a webhook arrived between them.
     """
-    return metrics.summarize(await metrics.load_snapshot())
+    curr = currency if currency is not None else get_settings().default_currency
+    return metrics.summarize(await metrics.load_snapshot(currency=curr))
 
 
 @router.get(
@@ -51,9 +74,12 @@ async def metrics_summary() -> MetricsSummary:
     response_model=list[RootCauseMetrics],
     summary="Revenue and recovery per diagnosed root cause",
 )
-async def metrics_by_root_cause() -> list[RootCauseMetrics]:
+async def metrics_by_root_cause(
+    currency: str | None = Query(default=None, description="Currency filter"),
+) -> list[RootCauseMetrics]:
     """Return one row per root cause, ordered by revenue at risk descending."""
-    return metrics.by_root_cause(await metrics.load_snapshot())
+    curr = currency if currency is not None else get_settings().default_currency
+    return metrics.by_root_cause(await metrics.load_snapshot(currency=curr))
 
 
 @router.get(
@@ -61,7 +87,9 @@ async def metrics_by_root_cause() -> list[RootCauseMetrics]:
     response_model=list[InterventionMetrics],
     summary="Recommended, authorized, executed and recovered per intervention",
 )
-async def metrics_by_intervention() -> list[InterventionMetrics]:
+async def metrics_by_intervention(
+    currency: str | None = Query(default=None, description="Currency filter"),
+) -> list[InterventionMetrics]:
     """Return the intervention-performance table, most-recommended first.
 
     `times_executed` can never exceed `times_authorized`: an execution requires an
@@ -76,7 +104,8 @@ async def metrics_by_intervention() -> list[InterventionMetrics]:
     `recoveries_manually_asserted`. The two rates are reported separately rather than
     blended so asserted money is never read as gateway-verified money.
     """
-    return metrics.by_intervention(await metrics.load_snapshot())
+    curr = currency if currency is not None else get_settings().default_currency
+    return metrics.by_intervention(await metrics.load_snapshot(currency=curr))
 
 
 @router.get(
@@ -84,9 +113,12 @@ async def metrics_by_intervention() -> list[InterventionMetrics]:
     response_model=PromiseMetrics,
     summary="Promise outcomes and the honor rate over resolved promises",
 )
-async def metrics_promise_to_pay() -> PromiseMetrics:
+async def metrics_promise_to_pay(
+    currency: str | None = Query(default=None, description="Currency filter"),
+) -> PromiseMetrics:
     """Return promise counts and the honor rate, excluding still-open promises."""
-    return metrics.promise_metrics(await metrics.load_snapshot())
+    curr = currency if currency is not None else get_settings().default_currency
+    return metrics.promise_metrics(await metrics.load_snapshot(currency=curr))
 
 
 @router.get(
@@ -94,7 +126,9 @@ async def metrics_promise_to_pay() -> PromiseMetrics:
     response_model=BaselineComparison,
     summary="SIMULATED naive strategies against Vasooli's real decisions",
 )
-async def metrics_baseline_comparison() -> BaselineComparison:
+async def metrics_baseline_comparison(
+    currency: str | None = Query(default=None, description="Currency filter"),
+) -> BaselineComparison:
     """Compare two naive baselines against Vasooli, on one shared event set.
 
     THREE OF THE FOUR FIGURES ARE SIMULATED — what-if arithmetic over stored data,
@@ -104,7 +138,8 @@ async def metrics_baseline_comparison() -> BaselineComparison:
 
     Nothing is executed, and no baseline writes a diagnosis, decision or verdict.
     """
-    return metrics.compare(await metrics.load_snapshot())
+    curr = currency if currency is not None else get_settings().default_currency
+    return metrics.compare(await metrics.load_snapshot(currency=curr))
 
 
 @router.get(

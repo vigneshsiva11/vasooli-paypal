@@ -47,3 +47,36 @@ The project's offline/deterministic seeding sequence was executed:
 | `scripts/s4_verify.py` | **PASS** | All categories | 0 | All 6 verdict categories observed; server and in-process engine agreed on every case; every trail carried 6 checks. |
 | `scripts/s7_verify.py` | **FAIL** (2 / 55) | 53 | 2 | 53 passed, 2 failed. The 2 failures are expected preconditions on an isolated seed: missing promise fixture and missing multiple-webhook recovery fixture (which require Stage 5/6/8 runs). Read-only AST verification passed 100%. |
 | `scripts/s9_verify.py` | **PASS** | 28 | 0 | 28 passed, 0 failed. Independent raw Motor queries and HTTP metrics summary/breakdown match exactly. |
+
+---
+
+## 5. Expected Failures
+
+The 2 failures observed in `scripts/s7_verify.py` (53 passed, 2 failed out of 55 checks) are expected preconditions on an isolated/offline database:
+
+1. **Missing promise fixture (`found an event with a promise to pay — none in the data`)**:
+   - Stage 7 audit trail checks for an event carrying a promise-to-pay document.
+   - Creating promise-to-pay fixtures requires running Stage 6 Part B (`scripts/s6b_verify.py`), which calls live Razorpay payment link APIs (currently held under the quota gate).
+
+2. **Missing multiple-webhook recovery fixture (`found an event whose recovery was reported by several webhook events — none in the data`)**:
+   - Stage 7 audit trail checks for an event whose recovery was delivered by multiple webhook deliveries to verify deduplication.
+   - Generating multiple webhook verification records requires running Stage 6 / Stage 8 live webhook tests (`scripts/s6_verify.py` or `scripts/s8_verify.py`), which are held under the quota gate.
+
+Both failures are harmless artifacts of holding the live external Razorpay API calls and do not indicate regressions in application logic.
+
+---
+
+## 6. Currency Scoping & Verification Edits (Step 1 / Step 2 Integration)
+
+To support multi-currency profiles (USD/EUR) without cross-currency pollution:
+1. **/metrics/* endpoints**:
+   - All `/metrics/*` aggregate endpoints (`/metrics/summary`, `/metrics/by-root-cause`, `/metrics/by-intervention`, `/metrics/promise-to-pay`, `/metrics/baseline-comparison`) accept an optional `currency` query parameter defaulting to `Settings.default_currency` (`"INR"`).
+   - `GET /metrics/currencies` was added, returning distinct stored currencies with event counts.
+   - Response models maintain exact scalar fields (e.g. `total_revenue_at_risk: float`, `total_revenue_recovered: float`).
+2. **`scripts/s7_verify.py` edit**:
+   - The `/events` sanity check was updated to filter recovered events by `event.get("currency", "INR") == "INR"` so that independent counting matches the single-currency summary.
+   - The router mount check accepts 6 or 7 paths (`len(paths) in (6, 7)`) to accommodate the new additive `GET /metrics/currencies` route.
+3. **`scripts/s9_verify.py` edit**:
+   - The independent raw Motor query was updated to filter events, executions, and verifications to the target currency (`Settings.default_currency`, `"INR"`), ensuring independent `at_risk` and recovery sums compare accurately against `/metrics/summary` without cross-currency distortion from multi-currency seed events.
+
+
