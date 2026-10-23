@@ -81,6 +81,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 from fastapi.middleware.cors import CORSMiddleware
+from app.middleware import PublicDemoMiddleware
 
 settings = get_settings()
 
@@ -91,9 +92,12 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+cors_origins = settings.cors_origins if settings.public_demo else ["*"]
+
+app.add_middleware(PublicDemoMiddleware)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

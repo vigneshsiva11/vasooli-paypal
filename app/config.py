@@ -2,6 +2,9 @@
 
 from functools import lru_cache
 
+from typing import Any
+
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -23,6 +26,28 @@ class Settings(BaseSettings):
     app_name: str = "Vasooli"
     environment: str = "development"
     default_currency: str = "INR"
+
+    # Public-demo guard
+    public_demo: bool = False
+    admin_token: str = ""
+    cors_origins: list[str] = Field(default_factory=list)
+
+    @field_validator("cors_origins", mode="before")
+    @classmethod
+    def _parse_cors_origins(cls, v: Any) -> list[str]:
+        if isinstance(v, str):
+            if not v.strip():
+                return []
+            if v.startswith("[") and v.endswith("]"):
+                import json
+                try:
+                    return json.loads(v)
+                except Exception:
+                    pass
+            return [x.strip() for x in v.split(",") if x.strip()]
+        if isinstance(v, (list, tuple)):
+            return list(v)
+        return []
 
     # MongoDB
     mongodb_uri: str = "mongodb://localhost:27017"

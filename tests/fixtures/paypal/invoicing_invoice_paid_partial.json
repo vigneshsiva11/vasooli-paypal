@@ -1,5 +1,5 @@
 {
-  "id": "WH-5C337437SC102342D-5EB43970FH092022S",
+  "id": "WH-99238613G8280990B-9FV78269C92473434",
   "event_version": "1.0",
   "create_time": "2026-10-15T16:38:16.646Z",
   "resource_type": "invoices",
@@ -152,9 +152,6 @@
       "method": "POST"
     }
   ],
-  "source": "derived",
-  "derived_from": "WH-99238613G8280990B-9FV78269C92473434",
-  "edits": [
-    "id rewritten from WH-99238613G8280990B-9FV78269C92473434 to WH-5C337437SC102342D-5EB43970FH092022S"
-  ]
+  "source": "captured",
+  "original_payload_sha256": "cca1394f1e4948bfe3af8b6cf1892d64744ff0377432daa7f4c63e8ab17fd816"
 }

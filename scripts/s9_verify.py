@@ -328,6 +328,59 @@ async def main() -> int:
             len([e for e in trail["timeline"] if e["stage"] == "6-verification"]),
         )
 
+    # ---- independent computation for currency=USD against /metrics/summary?currency=USD ---
+    print("\n[6] /metrics/summary?currency=USD — INDEPENDENT COMPUTATION (USD)")
+    usd_events = {
+        document["event_id"]: document
+        for document in all_events
+        if document.get("currency") == "USD"
+    }
+    usd_event_ids = set(usd_events.keys())
+    usd_verifications = [
+        document
+        async for document in db.verifications.find({})
+        if document.get("event_id") in usd_event_ids
+    ]
+    latest_usd: dict[str, dict] = {}
+    for document in usd_verifications:
+        if document.get("outcome") != "recovered":
+            continue
+        is_paypal = (document.get("gateway") == "paypal") or bool(document.get("paypal_event_id"))
+        key = f"paypal_event:{document.get('event_id')}" if is_paypal else document.get("execution_id")
+        if not key:
+            continue
+        current = latest_usd.get(key)
+        if current is None or document.get("verified_at", "") >= current.get("verified_at", ""):
+            latest_usd[key] = document
+
+    usd_recovered_records = [d for d in usd_verifications if d.get("outcome") == "recovered"]
+    usd_gateway_survivors = [d for d in latest_usd.values() if d.get("source") != MANUAL_SOURCE]
+    usd_manual_survivors = [d for d in latest_usd.values() if d.get("source") == MANUAL_SOURCE]
+    usd_gateway_money = money(sum(d["amount_recovered"] for d in usd_gateway_survivors))
+    usd_manual_money = money(sum(d["amount_recovered"] for d in usd_manual_survivors))
+    usd_at_risk = money(sum(d.get("amount", 0.0) for d in usd_events.values()))
+
+    summary_usd = get("/metrics/summary?currency=USD")
+    check("USD recovered verification records (raw, pre-dedup)",
+          len(usd_recovered_records), summary_usd["recovered_verification_records"])
+    check("USD distinct recoveries after collapse",
+          len(latest_usd), summary_usd["distinct_recoveries_counted"])
+    check("USD duplicates ignored", len(usd_recovered_records) - len(latest_usd),
+          summary_usd["duplicate_verification_records_ignored"])
+    check("USD distinct recoveries — gateway", len(usd_gateway_survivors),
+          summary_usd["distinct_recoveries_gateway_verified"])
+    check("USD distinct recoveries — manual", len(usd_manual_survivors),
+          summary_usd["distinct_recoveries_manually_asserted"])
+    check("USD gateway-verified revenue recovered", usd_gateway_money,
+          summary_usd["gateway_verified_recovered"])
+    check("USD manually-asserted revenue recovered", usd_manual_money,
+          summary_usd["manually_asserted_recovered"])
+    check("USD total revenue recovered", money(usd_gateway_money + usd_manual_money),
+          summary_usd["total_revenue_recovered"])
+    check("USD total revenue at risk", usd_at_risk, summary_usd["total_revenue_at_risk"])
+    expected_rate = round(100.0 * (usd_gateway_money + usd_manual_money) / usd_at_risk, 2) if usd_at_risk > 0 else None
+    check("USD recovery rate", expected_rate, summary_usd["recovery_rate"])
+
     print("\n" + "=" * 78)
     print(f"RESULT — {PASS} passed, {FAIL} failed")
     print("=" * 78)

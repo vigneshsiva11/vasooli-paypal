@@ -140,21 +140,20 @@ async def export_fixtures() -> int:
         )
         print(f"Exported [captured]: invoicing_invoice_paid_full.json (sha256={h_full})")
 
-        # 2. Derived fixtures (edits made)
-        # a) invoicing_invoice_paid_partial: WH-99238613G8280990B-9FV78269C92473434 with id rewritten to WH-5C337437SC102342D-5EB43970FH092022S
+        # f) invoicing_invoice_paid_partial: Genuine partially-paid event for INV2-LSEJ-2LLG-D59L-2QNU
+        # WH-99238613G8280990B-9FV78269C92473434 in vasooli
         doc_part = by_id["WH-99238613G8280990B-9FV78269C92473434"]
         pay_part = copy.deepcopy(doc_part["payload"])
-        pay_part["id"] = "WH-5C337437SC102342D-5EB43970FH092022S"
-        pay_part["source"] = "derived"
-        pay_part["derived_from"] = "WH-99238613G8280990B-9FV78269C92473434"
-        pay_part["edits"] = [
-            "id rewritten from WH-99238613G8280990B-9FV78269C92473434 to WH-5C337437SC102342D-5EB43970FH092022S"
-        ]
+        h_part = compute_sha256(pay_part)
+        pay_part["source"] = "captured"
+        pay_part["original_payload_sha256"] = h_part
         sanitize_payload(pay_part)
         (FIXTURES_DIR / "invoicing_invoice_paid_partial.json").write_text(
             json.dumps(pay_part, indent=2, default=str), encoding="utf-8"
         )
-        print("Exported [derived]:  invoicing_invoice_paid_partial.json")
+        print(f"Exported [captured]: invoicing_invoice_paid_partial.json (sha256={h_part})")
+
+        # 2. Derived fixtures (edits made)
 
         # b) payment_capture_completed: WH-8L187362UU567994A-61C083782M709240S with custom_id added
         doc_cap = by_id["WH-8L187362UU567994A-61C083782M709240S"]

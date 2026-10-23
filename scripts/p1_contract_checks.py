@@ -1271,7 +1271,7 @@ def test_step5_paypal_reconciliation() -> None:
             and rf1.duplicate is False
             and rf1.assertion == "gateway_verified"
             and rf1.outcome == "recovered"
-            and rf1.amount_recovered == 90.0
+            and rf1.amount_recovered == 100.0
             and db_full.events.docs[0]["status"] == "recovered"
             and full_verif.get("paypal_event") == "INVOICING.INVOICE.PAID"
         )
@@ -1379,6 +1379,57 @@ def test_step5_paypal_reconciliation() -> None:
             "5.11 Non-settlement fixtures: invoice created/sent, token created, capture declined acknowledge with 0 verifications",
             all_ns_ok,
             f"all 4 acknowledged without verifications; total db verifications={len(db_unmatched.verifications.docs)}",
+        )
+
+        # 5.12 PayPal cumulative recovery aggregation: partial ($10.00) + full ($100.00) for same event collapses to $100.00 (not $110.00)
+        from app.metrics.reader import Snapshot, distinct_recoveries, recovered_amount_per_event
+        from app.metrics.aggregate import summarize
+
+        db_cum = _MockMongoDB()
+        db_cum.executions.docs.append({
+            "_id": ObjectId("507f1f77bcf86cd799439005"),
+            "gateway": "paypal",
+            "gateway_ref": "INV2-LSEJ-2LLG-D59L-2QNU",
+            "event_id": "evt_paypal_inv_cum_test",
+            "amount": 100.0,
+        })
+        db_cum.events.docs.append({
+            "event_id": "evt_paypal_inv_cum_test",
+            "amount": 100.0,
+            "currency": "USD",
+            "status": "at_risk",
+        })
+
+        await reconcile_paypal_event(fix_part, db_cum)
+        await reconcile_paypal_event(fix_full, db_cum)
+
+        assert len(db_cum.verifications.docs) == 2, f"Expected 2 verifications, got {len(db_cum.verifications.docs)}"
+        cum_survivors, cum_dupes = distinct_recoveries(tuple(db_cum.verifications.docs))
+        cum_per_event = recovered_amount_per_event(tuple(db_cum.verifications.docs))
+
+        snap_cum = Snapshot(
+            events=tuple(db_cum.events.docs),
+            diagnoses=(),
+            decisions=(),
+            verdicts=(),
+            executions=tuple(db_cum.executions.docs),
+            verifications=tuple(db_cum.verifications.docs),
+            promises=(),
+            read_at=datetime.now(timezone.utc),
+        )
+        summary_cum = summarize(snap_cum)
+
+        cum_ok = (
+            len(cum_survivors) == 1
+            and cum_dupes == 1
+            and cum_per_event.get("evt_paypal_inv_cum_test") == 100.0
+            and summary_cum.total_revenue_recovered == 100.0
+            and summary_cum.gateway_verified_recovered == 100.0
+        )
+        report(
+            "5.12 PayPal cumulative recovery aggregation: partial ($10.00) + full ($100.00) collapses to $100.00 (not $110.00)",
+            cum_ok,
+            f"recovered={summary_cum.total_revenue_recovered}, distinct_survivors={len(cum_survivors)}, dupes_ignored={cum_dupes}",
         )
 
     asyncio.run(run_reconciliation_tests())
@@ -1664,6 +1715,94 @@ def test_step6_razorpay_verifier_characterization() -> None:
     )
 
 
+def test_step7_public_demo_guard() -> None:
+    print("\n--- SECTION 7: PUBLIC-DEMO GUARD CONTRACT CHECKS (OFFLINE) ---")
+    from fastapi import FastAPI
+    from starlette.testclient import TestClient
+    from app.config import Settings
+    from app.middleware import PublicDemoMiddleware
+
+    def build_test_app(settings: Settings) -> TestClient:
+        app = FastAPI()
+        app.add_middleware(PublicDemoMiddleware, settings=settings)
+
+        @app.get("/items")
+        async def get_items():
+            return {"items": ["a", "b"]}
+
+        @app.post("/items")
+        async def create_item():
+            return {"created": True}
+
+        @app.post("/webhooks/paypal")
+        async def paypal_webhook():
+            return {"received": True}
+
+        return TestClient(app)
+
+    # 7.1 Flag off -> write without token allowed
+    s_off = Settings(public_demo=False, admin_token="")
+    c_off = build_test_app(s_off)
+    r_off = c_off.post("/items", json={})
+    report(
+        "7.1 Public demo flag off: write request allowed without token",
+        r_off.status_code == 200,
+        f"status={r_off.status_code}",
+    )
+
+    # 7.2 Flag on, empty token -> 503 fail closed
+    s_empty = Settings(public_demo=True, admin_token="")
+    c_empty = build_test_app(s_empty)
+    r_empty = c_empty.post("/items", json={}, headers={"X-Admin-Token": "foo"})
+    report(
+        "7.2 Public demo on, empty admin_token: writes fail closed with 503",
+        r_empty.status_code == 503,
+        f"status={r_empty.status_code}",
+    )
+
+    # 7.3 Flag on, write without token -> 401
+    s_on = Settings(public_demo=True, admin_token="supersecrettoken")
+    c_on = build_test_app(s_on)
+    r_no_token = c_on.post("/items", json={})
+    report(
+        "7.3 Public demo on: write without X-Admin-Token returns 401",
+        r_no_token.status_code == 401,
+        f"status={r_no_token.status_code}",
+    )
+
+    # 7.4 Flag on, wrong token -> 401
+    r_wrong = c_on.post("/items", json={}, headers={"X-Admin-Token": "wrongtoken"})
+    report(
+        "7.4 Public demo on: write with wrong X-Admin-Token returns 401",
+        r_wrong.status_code == 401,
+        f"status={r_wrong.status_code}",
+    )
+
+    # 7.5 Flag on, right token -> 200 allowed
+    r_right = c_on.post("/items", json={}, headers={"X-Admin-Token": "supersecrettoken"})
+    report(
+        "7.5 Public demo on: write with valid X-Admin-Token returns 200",
+        r_right.status_code == 200,
+        f"status={r_right.status_code}",
+    )
+
+    # 7.6 Flag on: POST /webhooks/paypal bypasses the token
+    r_pp = c_on.post("/webhooks/paypal", json={})
+    report(
+        "7.6 Public demo on: POST /webhooks/paypal bypasses admin token check",
+        r_pp.status_code == 200,
+        f"status={r_pp.status_code}",
+    )
+
+    # 7.7 Flag on: GET endpoints unaffected
+    r_get = c_on.get("/items")
+    report(
+        "7.7 Public demo on: GET endpoints remain public without token",
+        r_get.status_code == 200,
+        f"status={r_get.status_code}",
+    )
+
+
 def main() -> int:
     print("=" * 78)
     print("PHASE 1 CONTRACT CHECKS (OFFLINE — NO NETWORK, NO DB, NO SERVER)")
@@ -1675,6 +1814,7 @@ def main() -> int:
     test_step3_execution_port_and_adapters()
     test_step5_paypal_reconciliation()
     test_step6_razorpay_verifier_characterization()
+    test_step7_public_demo_guard()
 
     print("\n" + "=" * 78)
     print(f"SUMMARY: {PASS_COUNT} PASSED, {FAIL_COUNT} FAILED")

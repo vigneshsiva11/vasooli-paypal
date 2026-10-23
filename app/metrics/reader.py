@@ -200,12 +200,13 @@ def distinct_recoveries(
     ]
     survivors: dict[str, Document] = {}
     for document in recovered:
-        execution_id = document.get("execution_id")
-        if execution_id is None:  # pragma: no cover - required by the model
+        is_paypal = (document.get("gateway") == "paypal") or bool(document.get("paypal_event_id"))
+        key = f"paypal_event:{document.get('event_id')}" if is_paypal else document.get("execution_id")
+        if not key:
             continue
-        current = survivors.get(execution_id)
-        if current is None or document["verified_at"] >= current["verified_at"]:
-            survivors[execution_id] = document
+        current = survivors.get(key)
+        if current is None or document.get("verified_at", _utc_now()) >= current.get("verified_at", _utc_now()):
+            survivors[key] = document
     return survivors, len(recovered) - len(survivors)
 
 

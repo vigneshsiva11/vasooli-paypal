@@ -244,7 +244,7 @@ async def reconcile_paypal_event(
         )
 
         try:
-            res = await db.verifications.insert_one(record.model_dump())
+            res = await db.verifications.insert_one(record.model_dump(exclude_none=True))
             vid = str(res.inserted_id)
         except DuplicateKeyError:
             existing = await db.verifications.find_one({"paypal_event_id": paypal_event_id})
@@ -319,8 +319,12 @@ async def reconcile_paypal_event(
         tx_type = latest_tx.get("type", "PAYPAL")
         assertion = MERCHANT_ASSERTED if tx_type == "EXTERNAL" else GATEWAY_VERIFIED
 
-        amount_val = latest_tx.get("amount", {}).get("value", "0.0")
-        amount_recovered = float(amount_val)
+        paid_val = invoice.get("payments", {}).get("paid_amount", {}).get("value")
+        if paid_val is not None:
+            amount_recovered = float(paid_val)
+        else:
+            amount_val = latest_tx.get("amount", {}).get("value", "0.0")
+            amount_recovered = float(amount_val)
         due_val = float(invoice.get("due_amount", {}).get("value", 0.0))
         amount_expected = await _resolve_expected_amount(execution, db)
         inv_status = invoice.get("status")
@@ -345,7 +349,7 @@ async def reconcile_paypal_event(
             )
 
             try:
-                res = await db.verifications.insert_one(record.model_dump())
+                res = await db.verifications.insert_one(record.model_dump(exclude_none=True))
                 vid = str(res.inserted_id)
             except DuplicateKeyError:
                 existing = await db.verifications.find_one({"paypal_event_id": paypal_event_id})
@@ -403,7 +407,7 @@ async def reconcile_paypal_event(
             )
 
             try:
-                res = await db.verifications.insert_one(record.model_dump())
+                res = await db.verifications.insert_one(record.model_dump(exclude_none=True))
                 vid = str(res.inserted_id)
             except DuplicateKeyError:
                 existing = await db.verifications.find_one({"paypal_event_id": paypal_event_id})
