@@ -1803,6 +1803,102 @@ def test_step7_public_demo_guard() -> None:
     )
 
 
+def test_step8_settings_cors_origins() -> None:
+    print("\n--- SECTION 8: SETTINGS CORS_ORIGINS & LIST FIELDS CONTRACT CHECKS (OFFLINE) ---")
+    import os
+    import typing
+    from app.config import Settings
+
+    orig_cors = os.environ.get("CORS_ORIGINS")
+    orig_demo = os.environ.get("PUBLIC_DEMO")
+
+    forms = [
+        ("unset", None, []),
+        ("empty string", "", []),
+        ("single URL", "http://localhost:5173", ["http://localhost:5173"]),
+        ("comma-separated list", "http://a.com, http://b.com", ["http://a.com", "http://b.com"]),
+        ("comma-separated with whitespace/empty dropped", "http://a.com, , http://b.com, ", ["http://a.com", "http://b.com"]),
+        ("JSON array", '["http://a.com", "http://b.com"]', ["http://a.com", "http://b.com"]),
+    ]
+
+    try:
+        # Test each form with PUBLIC_DEMO both off and on
+        for demo_flag, demo_expected, demo_label in [("false", False, "off"), ("true", True, "on")]:
+            os.environ["PUBLIC_DEMO"] = demo_flag
+            for form_name, env_val, expected in forms:
+                if env_val is None:
+                    os.environ.pop("CORS_ORIGINS", None)
+                else:
+                    os.environ["CORS_ORIGINS"] = env_val
+
+                s = Settings()
+                ok = (s.cors_origins == expected) and (s.public_demo == demo_expected)
+                report(
+                    f"8.{demo_label}.{form_name}: Settings loads CORS_ORIGINS ({form_name}) with PUBLIC_DEMO={demo_label}",
+                    ok,
+                    f"cors_origins={s.cors_origins!r}, public_demo={s.public_demo!r}",
+                )
+
+        # Check that every other list-typed field in Settings, if any, loads from a plain string env value
+        def _is_list_type(annotation: Any) -> bool:
+            if annotation is list:
+                return True
+            origin = typing.get_origin(annotation)
+            if origin is list:
+                return True
+            if origin is typing.Annotated:
+                args = typing.get_args(annotation)
+                return bool(args and _is_list_type(args[0]))
+            if origin is typing.Union:
+                return any(_is_list_type(arg) for arg in typing.get_args(annotation))
+            return False
+
+        other_list_fields = [
+            name for name, field in Settings.model_fields.items()
+            if name != "cors_origins" and _is_list_type(field.annotation)
+        ]
+
+        if other_list_fields:
+            for name in other_list_fields:
+                env_var = name.upper()
+                prev = os.environ.get(env_var)
+                try:
+                    os.environ[env_var] = "plain_string_value"
+                    s = Settings()
+                    val = getattr(s, name)
+                    report(
+                        f"8.other.{name}: list field '{name}' loads from plain string env value",
+                        isinstance(val, list) and len(val) > 0,
+                        f"{name}={val!r}",
+                    )
+                except Exception as exc:
+                    report(
+                        f"8.other.{name}: list field '{name}' loads from plain string env value",
+                        False,
+                        f"exception: {exc}",
+                    )
+                finally:
+                    if prev is None:
+                        os.environ.pop(env_var, None)
+                    else:
+                        os.environ[env_var] = prev
+        else:
+            report(
+                "8.other: Every other list-typed field in Settings, if any, loads from a plain string env value",
+                True,
+                "no other list-typed fields present in Settings",
+            )
+    finally:
+        if orig_cors is None:
+            os.environ.pop("CORS_ORIGINS", None)
+        else:
+            os.environ["CORS_ORIGINS"] = orig_cors
+        if orig_demo is None:
+            os.environ.pop("PUBLIC_DEMO", None)
+        else:
+            os.environ["PUBLIC_DEMO"] = orig_demo
+
+
 def main() -> int:
     print("=" * 78)
     print("PHASE 1 CONTRACT CHECKS (OFFLINE — NO NETWORK, NO DB, NO SERVER)")
@@ -1815,6 +1911,7 @@ def main() -> int:
     test_step5_paypal_reconciliation()
     test_step6_razorpay_verifier_characterization()
     test_step7_public_demo_guard()
+    test_step8_settings_cors_origins()
 
     print("\n" + "=" * 78)
     print(f"SUMMARY: {PASS_COUNT} PASSED, {FAIL_COUNT} FAILED")

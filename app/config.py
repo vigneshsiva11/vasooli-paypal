@@ -1,11 +1,11 @@
 """Application settings, loaded from environment variables / `.env`."""
 
+import json
 from functools import lru_cache
-
-from typing import Any
+from typing import Annotated, Any
 
 from pydantic import Field, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
 class Settings(BaseSettings):
@@ -30,23 +30,27 @@ class Settings(BaseSettings):
     # Public-demo guard
     public_demo: bool = False
     admin_token: str = ""
-    cors_origins: list[str] = Field(default_factory=list)
+    cors_origins: Annotated[list[str], NoDecode] = Field(default_factory=list)
 
     @field_validator("cors_origins", mode="before")
     @classmethod
     def _parse_cors_origins(cls, v: Any) -> list[str]:
+        if v is None:
+            return []
         if isinstance(v, str):
-            if not v.strip():
+            s = v.strip()
+            if not s:
                 return []
-            if v.startswith("[") and v.endswith("]"):
-                import json
+            if s.startswith("[") and s.endswith("]"):
                 try:
-                    return json.loads(v)
+                    loaded = json.loads(s)
+                    if isinstance(loaded, list):
+                        return [str(x).strip() for x in loaded if str(x).strip()]
                 except Exception:
                     pass
-            return [x.strip() for x in v.split(",") if x.strip()]
+            return [x.strip() for x in s.split(",") if x.strip()]
         if isinstance(v, (list, tuple)):
-            return list(v)
+            return [str(x).strip() for x in v if str(x).strip()]
         return []
 
     # MongoDB
