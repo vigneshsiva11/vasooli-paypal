@@ -46,7 +46,7 @@ sys.path.insert(0, str(ROOT))
 from motor.motor_asyncio import AsyncIOMotorClient
 from app.config import get_settings
 
-BASE = "http://127.0.0.1:8123"
+BASE = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8123"
 WEBHOOK_SOURCE = "webhook"
 MANUAL_SOURCE = "manual_confirmation"
 CONTACT_ACTION = "contact_logged"

@@ -32,6 +32,9 @@ class Settings(BaseSettings):
     admin_token: str = ""
     cors_origins: Annotated[list[str], NoDecode] = Field(default_factory=list)
 
+    # Orchestrator
+    auto_orchestrate: bool = False
+
     @field_validator("cors_origins", mode="before")
     @classmethod
     def _parse_cors_origins(cls, v: Any) -> list[str]:

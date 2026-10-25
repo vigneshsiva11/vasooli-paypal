@@ -151,6 +151,10 @@ class RevenueEvent(BaseModel):
         default=None,
         description="Gateway's native reference for this charge or order, e.g. order_id or capture_id.",
     )
+    gateway_detail: Optional[dict[str, Any]] = Field(
+        default=None,
+        description="Gateway-specific detail, e.g. processor response and advice code.",
+    )
     created_at: datetime = Field(
         default_factory=_utc_now,
         description="When the event entered the system (UTC).",

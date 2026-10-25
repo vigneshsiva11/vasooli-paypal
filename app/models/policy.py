@@ -47,6 +47,9 @@ PolicyReason = Literal[
     # Customer-protection limits.
     "contact_cap_exceeded",
     "cooldown_active",
+    # Retry eligibility (defence in depth).
+    "retry_not_advised",
+    "retry_cap_exceeded",
     # Economics.
     "erv_below_minimum",
     # Currency unsupported — fail-closed to manual review.
@@ -67,6 +70,8 @@ REASON_VERDICT: dict[str, str] = {
     "customer_opted_out": "blocked",
     "contact_cap_exceeded": "blocked",
     "cooldown_active": "blocked",
+    "retry_not_advised": "blocked",
+    "retry_cap_exceeded": "blocked",
     "erv_below_minimum": "blocked",
     "unsupported_currency": "requires_manual_review",
     "amount_never_auto": "requires_manual_review",
@@ -87,6 +92,19 @@ REASON_PRECEDENCE: tuple[str, ...] = (
     "customer_opted_out",
     "contact_cap_exceeded",
     "cooldown_active",
+    "erv_below_minimum",
+    "unsupported_currency",
+    "amount_never_auto",
+    "amount_requires_approval",
+)
+
+ALL_REASON_PRECEDENCE: tuple[str, ...] = (
+    "no_action_recommended",
+    "customer_opted_out",
+    "contact_cap_exceeded",
+    "cooldown_active",
+    "retry_not_advised",
+    "retry_cap_exceeded",
     "erv_below_minimum",
     "unsupported_currency",
     "amount_never_auto",
@@ -120,6 +138,8 @@ CHECK_FOR_REASON: dict[str, str] = {
     "customer_opted_out": "customer_opt_out",
     "contact_cap_exceeded": "contact_cap",
     "cooldown_active": "contact_cooldown",
+    "retry_not_advised": "decision_is_actionable",
+    "retry_cap_exceeded": "decision_is_actionable",
     "erv_below_minimum": "erv_minimum",
     "unsupported_currency": "amount_tier",
     "amount_never_auto": "amount_tier",
@@ -212,12 +232,17 @@ def check_failed(entry: str) -> bool:
     return entry.split(": ", 1)[1].startswith(CHECK_FAIL)
 
 
-def primary_reason(failed_reasons: set[str]) -> str:
+def primary_reason(failed_reasons: set[str], precedence: tuple[str, ...] | None = None) -> str:
     """Return the highest-precedence reason among those that failed.
 
     Returns `"ok"` when nothing failed.
     """
-    for reason in REASON_PRECEDENCE:
+    order = precedence or (
+        ALL_REASON_PRECEDENCE
+        if ("retry_not_advised" in failed_reasons or "retry_cap_exceeded" in failed_reasons)
+        else REASON_PRECEDENCE
+    )
+    for reason in order:
         if reason in failed_reasons:
             return reason
     return "ok"
@@ -386,9 +411,16 @@ class PolicyVerdict(BaseModel):
             for reason, check in CHECK_FOR_REASON.items()
             if check in failed_checks
         }
-        # `amount_tier` maps to multiple reasons; only the one actually reported can
-        # be assumed to have applied, so drop the other from the comparison.
-        for reason in ("amount_never_auto", "amount_requires_approval", "unsupported_currency"):
+        # `amount_tier` and `decision_is_actionable` map to multiple reasons; only the one
+        # actually reported can be assumed to have applied, so drop the other from the comparison.
+        for reason in (
+            "amount_never_auto",
+            "amount_requires_approval",
+            "unsupported_currency",
+            "no_action_recommended",
+            "retry_not_advised",
+            "retry_cap_exceeded",
+        ):
             if reason != self.reason:
                 failed_reasons.discard(reason)
 

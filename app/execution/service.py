@@ -293,6 +293,7 @@ async def execute(
     *,
     credentials: razorpay.RazorpayCredentials | None = None,
     vault_token: str | None = None,
+    simulated_time: bool = False,
 ) -> ExecutionOutcome:
     """Perform the action one authorized verdict permits, at most once.
 
@@ -409,6 +410,7 @@ async def execute(
         executed_at=_utc_now(),
         status=status,
         failure_reason=failure_reason,
+        simulated_time=simulated_time,
         **fields,
     )
 

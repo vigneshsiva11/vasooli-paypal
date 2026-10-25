@@ -205,8 +205,23 @@ def distinct_recoveries(
         if not key:
             continue
         current = survivors.get(key)
-        if current is None or document.get("verified_at", _utc_now()) >= current.get("verified_at", _utc_now()):
+        if current is None:
             survivors[key] = document
+        elif is_paypal:
+            # Step 5: choose verification to count per event by HIGHEST cumulative paid amount,
+            # tie-broken by PayPal event create_time (verified_at), never by arrival time.
+            doc_amt = float(document.get("amount_recovered") or 0.0)
+            cur_amt = float(current.get("amount_recovered") or 0.0)
+            if doc_amt > cur_amt:
+                survivors[key] = document
+            elif doc_amt == cur_amt:
+                doc_time = document.get("verified_at") or _utc_now()
+                cur_time = current.get("verified_at") or _utc_now()
+                if doc_time >= cur_time:
+                    survivors[key] = document
+        else:
+            if document.get("verified_at", _utc_now()) >= current.get("verified_at", _utc_now()):
+                survivors[key] = document
     return survivors, len(recovered) - len(survivors)
 
 

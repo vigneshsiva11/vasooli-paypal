@@ -1,0 +1,87 @@
+{
+  "create_time": "2026-10-25T05:55:51.428Z",
+  "event_type": "PAYMENT.CAPTURE.COMPLETED",
+  "event_version": "1.0",
+  "id": "WH-6BJ84679FR1049458-6RT28794KN431740B",
+  "links": [
+    {
+      "href": "https://api.sandbox.paypal.com/v1/notifications/webhooks-events/WH-6BJ84679FR1049458-6RT28794KN431740B",
+      "method": "GET",
+      "rel": "self"
+    },
+    {
+      "href": "https://api.sandbox.paypal.com/v1/notifications/webhooks-events/WH-6BJ84679FR1049458-6RT28794KN431740B/resend",
+      "method": "POST",
+      "rel": "resend"
+    }
+  ],
+  "resource": {
+    "amount": {
+      "currency_code": "USD",
+      "value": "5.00"
+    },
+    "create_time": "2026-10-25T05:55:46Z",
+    "custom_id": "cust:probe1",
+    "final_capture": true,
+    "id": "28C544276S4714412",
+    "links": [
+      {
+        "href": "https://api.sandbox.paypal.com/v2/payments/captures/28C544276S4714412",
+        "method": "GET",
+        "rel": "self"
+      },
+      {
+        "href": "https://api.sandbox.paypal.com/v2/payments/captures/28C544276S4714412/refund",
+        "method": "POST",
+        "rel": "refund"
+      },
+      {
+        "href": "https://api.sandbox.paypal.com/v2/checkout/orders/8YF00147EB635281R",
+        "method": "GET",
+        "rel": "up"
+      }
+    ],
+    "network_transaction_reference": {
+      "id": "942924423860825",
+      "network": "VISA"
+    },
+    "payee": {
+      "email_address": "sb-n3vd953304200@business.example.com",
+      "merchant_id": "FJD79RSJQC7BC"
+    },
+    "processor_response": {
+      "avs_code": "A",
+      "cvv_code": "M",
+      "response_code": "0000"
+    },
+    "seller_protection": {
+      "status": "NOT_ELIGIBLE"
+    },
+    "seller_receivable_breakdown": {
+      "gross_amount": {
+        "currency_code": "USD",
+        "value": "5.00"
+      },
+      "net_amount": {
+        "currency_code": "USD",
+        "value": "4.38"
+      },
+      "paypal_fee": {
+        "currency_code": "USD",
+        "value": "0.62"
+      }
+    },
+    "status": "COMPLETED",
+    "supplementary_data": {
+      "related_ids": {
+        "order_id": "8YF00147EB635281R"
+      }
+    },
+    "update_time": "2026-10-25T05:55:46Z"
+  },
+  "resource_type": "capture",
+  "resource_version": "2.0",
+  "summary": "Payment completed for $ 5.0 USD",
+  "source": "captured",
+  "original_payload_sha256": "520dea1e1a820b96b356377acb9c4e1ad5aba602a55a4abf8af21a74a058e03d"
+}

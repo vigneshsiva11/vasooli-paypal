@@ -132,6 +132,30 @@ EVENTS = [
         "customer_ref": "cust_pol_S4_eur",
         "raw_failure_reason": "insufficient_funds",
     },
+    # USD retry-not-advised fixture (payment_advice_code="03" -> retry_not_advised)
+    {
+        "event_id": "pol_S4_USD_RETRY_ADVICE",
+        "surface": "payment",
+        "amount": 100.00,
+        "currency": "USD",
+        "customer_ref": "cust_pol_S4_usd_retry_advice",
+        "raw_failure_reason": "insufficient_funds",
+        "gateway": "paypal",
+        "gateway_detail": {
+            "payment_advice_code": "03",
+            "processor_response": {"payment_advice_code": "03"},
+        },
+    },
+    # USD retry-cap-exceeded fixture (3 prior retry executions -> retry_cap_exceeded)
+    {
+        "event_id": "pol_S4_USD_RETRY_CAP",
+        "surface": "payment",
+        "amount": 100.00,
+        "currency": "USD",
+        "customer_ref": "cust_pol_S4_usd_retry_cap",
+        "raw_failure_reason": "insufficient_funds",
+        "gateway": "paypal",
+    },
 ]
 
 #: Hours before now at which the three prior contacts on `pol_S4_CAP` were
@@ -142,12 +166,17 @@ BACKDATED_CONTACT_HOURS = (100, 70, 40)
 
 
 def post(path: str, payload: dict | None = None) -> tuple[int, dict]:
+    import os
     data = json.dumps(payload).encode() if payload is not None else b""
+    headers = {"Content-Type": "application/json"}
+    token = os.environ.get("ADMIN_TOKEN")
+    if token:
+        headers["X-Admin-Token"] = token
     request = urllib.request.Request(
         f"{BASE}{path}",
         data=data,
         method="POST",
-        headers={"Content-Type": "application/json"},
+        headers=headers,
     )
     try:
         with urllib.request.urlopen(request, timeout=60) as response:
@@ -177,6 +206,36 @@ async def seed_events() -> None:
                 f"   {event.event_id:<24} {event.currency} {event.amount:>9,.2f}  "
                 f"{event.customer_ref:<22} created={created}"
             )
+
+    now = datetime.now(timezone.utc)
+    # Seed active vault tokens for both retry fixtures
+    for cust in ("cust_pol_S4_usd_retry_advice", "cust_pol_S4_usd_retry_cap"):
+        await db["customer_vault"].update_one(
+            {"customer_ref": cust},
+            {
+                "$set": {
+                    "vault_id": f"tok_v_{cust}",
+                    "brand": "VISA",
+                    "last_digits": "1234",
+                    "status": "active",
+                    "created_at": now,
+                }
+            },
+            upsert=True,
+        )
+
+    # Seed 3 prior completed retry executions for pol_S4_USD_RETRY_CAP
+    await db["executions"].delete_many({"event_id": "pol_S4_USD_RETRY_CAP"})
+    for i in range(3):
+        await db["executions"].insert_one({
+            "event_id": "pol_S4_USD_RETRY_CAP",
+            "policy_verdict_id": f"507f1f77bcf86cd79943909{i}",
+            "intervention": "delayed_retry",
+            "action_type": "retry_simulated",
+            "status": "completed",
+            "executed_at": now - timedelta(hours=30 + i * 25),
+        })
+
     await close_mongo_connection()
 
 

@@ -21,6 +21,15 @@ from app.gateways.paypal.client import (
     paypal_client,
 )
 
+from app.gateways.paypal.charge_attempts import (
+    get_charge_attempt,
+    record_charge_attempt,
+)
+from app.gateways.paypal.vault import (
+    get_active_vault_token,
+    store_vault_token,
+)
+
 __all__ = [
     "SANDBOX_BASE",
     "PayPalCallFailed",
@@ -29,4 +38,8 @@ __all__ = [
     "credentials_from_settings",
     "get_access_token",
     "paypal_client",
+    "get_charge_attempt",
+    "record_charge_attempt",
+    "get_active_vault_token",
+    "store_vault_token",
 ]

@@ -52,9 +52,9 @@ ActionType = Literal[
 #:
 #: `completed` means the side effect we intended actually happened: Razorpay
 #: accepted the request and returned a link, or the contact record was written.
-#: `failed` means it did not. Neither says anything about the customer's response,
-#: which is unknowable at this point and is Stage 6's entire subject.
-ExecutionStatus = Literal["completed", "failed"]
+#: `failed` means it did not. `declined` means the payment rail explicitly refused the charge.
+#: Neither says anything about the customer's response, which is Stage 6's subject.
+ExecutionStatus = Literal["completed", "failed", "declined"]
 
 #: Which action each executable intervention produces. The single place the
 #: mapping is declared, so the executor and the validator cannot disagree about
@@ -290,6 +290,10 @@ class ExecutionRecord(BaseModel):
         min_length=1,
         max_length=500,
         description="Why the attempt failed. Required when status is 'failed'.",
+    )
+    simulated_time: bool = Field(
+        default=False,
+        description="Whether execution was created under a simulated clock.",
     )
 
     @model_validator(mode="after")

@@ -26,16 +26,18 @@ Test with real sandbox events only (ngrok + PayPal Developer Dashboard webhook).
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import APIRouter, Request, Response, status
+from fastapi import APIRouter, BackgroundTasks, Request, Response, status
 from motor.motor_asyncio import AsyncIOMotorCollection
 from pymongo import ASCENDING
 from pymongo.errors import DuplicateKeyError
 
+from app.config import get_settings
 from app.db import get_database
 from app.gateways.paypal.webhooks import (
     PayPalCallFailed,
@@ -44,6 +46,7 @@ from app.gateways.paypal.webhooks import (
     VerifiedPayPalWebhook,
     accept,
 )
+from app.orchestrator import advance
 from app.webhooks.paypal_reconciler import reconcile_paypal_event
 
 logger = logging.getLogger(__name__)
@@ -51,6 +54,20 @@ logger = logging.getLogger(__name__)
 PAYPAL_EVENTS_COLLECTION = "paypal_events"
 
 paypal_webhook_router = APIRouter(tags=["paypal-webhooks"])
+
+_background_tasks: set[asyncio.Task[Any]] = set()
+
+
+async def _safe_orchestrate(event_id: str) -> None:
+    """Execute advance for event_id, holding strong reference and logging exception type only."""
+    try:
+        await advance(event_id)
+    except Exception as exc:
+        logger.error(
+            "Auto-orchestration background task failed for event %s: %s",
+            event_id,
+            type(exc).__name__,
+        )
 
 # ---------------------------------------------------------------------------
 # Collection + index (lazy, idempotent)
@@ -101,7 +118,7 @@ async def _store_event(verified: VerifiedPayPalWebhook) -> bool:
     summary="Receive and verify a PayPal sandbox webhook event",
     status_code=status.HTTP_200_OK,
 )
-async def receive_paypal_webhook(request: Request) -> Response:
+async def receive_paypal_webhook(request: Request, background_tasks: BackgroundTasks) -> Response:
     """Verify and store an inbound PayPal webhook event.
 
     Status codes:
@@ -179,6 +196,17 @@ async def receive_paypal_webhook(request: Request) -> Response:
         response_payload["verification_id"] = reconcile_res.verification_id
     if reconcile_res and reconcile_res.outcome:
         response_payload["outcome"] = reconcile_res.outcome
+
+    # Automatic background trigger after decline ingestion behind auto_orchestrate setting
+    if (
+        get_settings().auto_orchestrate
+        and reconcile_res
+        and reconcile_res.revenue_event_id
+        and not reconcile_res.duplicate
+    ):
+        task = asyncio.create_task(_safe_orchestrate(reconcile_res.revenue_event_id))
+        _background_tasks.add(task)
+        task.add_done_callback(_background_tasks.discard)
 
     return Response(
         content=json.dumps(response_payload),

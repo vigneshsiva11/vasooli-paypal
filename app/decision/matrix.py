@@ -177,6 +177,15 @@ INTERVENTION_MATRIX: dict[tuple[str, str], tuple[Candidate, ...]] = {
             "the expiry date will not change.",
         ),
     ),
+    ("payment", "card_verification_failed"): (
+        Candidate(
+            "payment_method_update_link",
+            0.45,
+            "The blocker is invalid CVV/verification data, so a customer who "
+            "still wants the product can fix it by updating card details. Retrying "
+            "with same details cannot help.",
+        ),
+    ),
     ("payment", "issuer_declined"): (
         Candidate(
             "delayed_retry",

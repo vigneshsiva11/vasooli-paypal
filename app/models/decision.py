@@ -163,6 +163,15 @@ class Decision(BaseModel):
         max_length=1200,
         description="Human-readable account of why this intervention won.",
     )
+    excluded_interventions: list[str] | None = Field(
+        default=None,
+        description="Interventions excluded from consideration (e.g. retries excluded due to missing vault token or advice code).",
+    )
+    exclusion_reason: str | None = Field(
+        default=None,
+        max_length=500,
+        description="Reason why interventions were excluded.",
+    )
     decided_at: datetime = Field(
         default_factory=_utc_now,
         description="When the recommendation was produced (UTC).",

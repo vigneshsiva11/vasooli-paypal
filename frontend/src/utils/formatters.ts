@@ -12,9 +12,17 @@ export const formatPercentage = (value: number | null | undefined, fractionDigit
   return `${value.toFixed(fractionDigits)}%`;
 };
 
+const ROOT_CAUSE_LABELS: Record<string, string> = {
+  card_verification_failed: 'Card Verification Failed',
+};
+
 export const formatLabel = (key: string) => {
+  if (ROOT_CAUSE_LABELS[key]) {
+    return ROOT_CAUSE_LABELS[key];
+  }
   return key
     .split('_')
     .map(word => word.charAt(0).toUpperCase() + word.slice(1))
     .join(' ');
 };
+

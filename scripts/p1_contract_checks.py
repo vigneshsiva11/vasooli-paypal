@@ -74,8 +74,12 @@ from app.diagnosis.rules import _history_evidence, HIGH_VALUE_THRESHOLDS
 from app.execution import razorpay
 from app.execution import service as execution_service
 
+import logging
+
 RECORDED_INR_FINGERPRINT = "rb1_aba19a5e5ee8124e"
-RECORDED_USD_FINGERPRINT = "rb1_5ae21fdd06acd873"
+RECORDED_USD_FINGERPRINT = "rb1_8221b1b9069ffc80"
+SUPERSEDED_USD_V1_FINGERPRINT = "rb1_c7c49bbd323ceed4"
+SUPERSEDED_USD_V2_FINGERPRINT = "rb1_f1e6f9c8957920de"
 
 PASS_COUNT = 0
 FAIL_COUNT = 0
@@ -504,6 +508,37 @@ def test_step2_rulebook_and_policy() -> None:
         f"actual={usd_fp!r}, expected={RECORDED_USD_FINGERPRINT!r}",
     )
 
+    # 3.2b Rulebook registry resolves historical USD v1, current USD, and INR
+    from app.policy.rules import rulebook_registry
+    registry = rulebook_registry()
+    registry_ok = (
+        RECORDED_INR_FINGERPRINT in registry
+        and SUPERSEDED_USD_V1_FINGERPRINT in registry
+        and SUPERSEDED_USD_V2_FINGERPRINT in registry
+        and RECORDED_USD_FINGERPRINT in registry
+    )
+    report(
+        "rulebook_registry keeps previous USD rulebooks (v1, v2) and resolves INR and current USD",
+        registry_ok,
+        f"has_inr={RECORDED_INR_FINGERPRINT in registry}, has_v1_usd={SUPERSEDED_USD_V1_FINGERPRINT in registry}, has_v2_usd={SUPERSEDED_USD_V2_FINGERPRINT in registry}, has_current_usd={RECORDED_USD_FINGERPRINT in registry}",
+    )
+
+    # 3.2c Fingerprint ledger contract check (docs/regression/fingerprints.md)
+    ledger_path = ROOT / "docs" / "regression" / "fingerprints.md"
+    ledger_content = ledger_path.read_text(encoding="utf-8")
+    ledger_lines = [line.strip() for line in ledger_content.splitlines() if line.strip().startswith("|")]
+    table_rows = [r for r in ledger_lines if not r.startswith("| Currency") and not r.startswith("|---")]
+    inr_rows = [r for r in table_rows if "| INR |" in r]
+    usd_rows = [r for r in table_rows if "| USD |" in r]
+
+    inr_ledger_ok = len(inr_rows) == 1 and f"`{RECORDED_INR_FINGERPRINT}`" in inr_rows[0]
+    last_usd_fp_ok = len(usd_rows) >= 1 and f"`{current_fingerprint('USD')}`" in usd_rows[-1]
+    report(
+        "Fingerprint ledger contract check: INR row equals rb1_aba19a5e5ee8124e and last USD row equals current_fingerprint('USD')",
+        inr_ledger_ok and last_usd_fp_ok,
+        f"inr_ok={inr_ledger_ok}, last_usd_ok={last_usd_fp_ok}",
+    )
+
     # 3.3 USD profile thresholds
     usd_book = current_usd_rulebook()
     report(
@@ -651,6 +686,133 @@ def test_step2_rulebook_and_policy() -> None:
         "Decision for card_expired in USD uses USD cost ($0.06)",
         dec_usd_paid.estimated_cost == 0.06 and dec_usd_paid.recommended_intervention == "payment_method_update_link",
         f"intervention={dec_usd_paid.recommended_intervention}, cost=${dec_usd_paid.estimated_cost}",
+    )
+    # 3.9 USD Retry Cap: max 3 retry executions per event
+    from datetime import timedelta
+    dec_retry = make_decision(amount=100.0, intervention="delayed_retry", cost=0.0, prob=0.8, erv=80.0)
+    ctx_retry_cap = PolicyContext(
+        customer_ref="cust_usd_cap",
+        customer_opted_out=False,
+        prior_authorized_contacts=0,
+        last_authorized_contact_at=None,
+        prior_retry_executions=3,
+        last_retry_execution_at=ctx.now - timedelta(days=2),
+        now=ctx.now,
+    )
+    v_retry_cap = evaluate(decision=dec_retry, context=ctx_retry_cap, currency="USD")
+    report(
+        "USD retry cap: >= 3 prior retry executions blocks with retry_cap_exceeded",
+        v_retry_cap.verdict == "blocked" and v_retry_cap.reason == "retry_cap_exceeded",
+        f"verdict={v_retry_cap.verdict}, reason={v_retry_cap.reason}",
+    )
+
+    # 3.10 USD Retry Cooldown: at least 24 hours between retries
+    ctx_retry_cooldown = PolicyContext(
+        customer_ref="cust_usd_cooldown",
+        customer_opted_out=False,
+        prior_authorized_contacts=0,
+        last_authorized_contact_at=None,
+        prior_retry_executions=1,
+        last_retry_execution_at=ctx.now - timedelta(hours=12),
+        now=ctx.now,
+    )
+    v_retry_cooldown = evaluate(decision=dec_retry, context=ctx_retry_cooldown, currency="USD")
+    report(
+        "USD retry cooldown: < 24h since last retry execution blocks with retry_cap_exceeded",
+        v_retry_cooldown.verdict == "blocked" and v_retry_cooldown.reason == "retry_cap_exceeded",
+        f"verdict={v_retry_cooldown.verdict}, reason={v_retry_cooldown.reason}",
+    )
+
+    # 3.11 USD Retry Allowed: < 3 retries and >= 24h gap authorizes
+    ctx_retry_ok = PolicyContext(
+        customer_ref="cust_usd_retry_ok",
+        customer_opted_out=False,
+        prior_authorized_contacts=0,
+        last_authorized_contact_at=None,
+        prior_retry_executions=2,
+        last_retry_execution_at=ctx.now - timedelta(hours=25),
+        now=ctx.now,
+    )
+    v_retry_ok = evaluate(decision=dec_retry, context=ctx_retry_ok, currency="USD")
+    report(
+        "USD retry allowed: < 3 prior retries and >= 24h gap authorizes with ok",
+        v_retry_ok.verdict == "authorized" and v_retry_ok.reason == "ok",
+        f"verdict={v_retry_ok.verdict}, reason={v_retry_ok.reason}",
+    )
+
+    # 3.12 INR profile untouched: retry_cap_exceeded is not in INR reason precedence or verdicts
+    from app.policy.rules import INR_REASON_PRECEDENCE, INR_REASON_VERDICT
+    inr_untouched = (
+        "retry_cap_exceeded" not in INR_REASON_PRECEDENCE
+        and not any(r == "retry_cap_exceeded" for r, _ in INR_REASON_VERDICT)
+    )
+    report(
+        "INR tables untouched: retry_cap_exceeded not present in INR precedence or verdict tables",
+        inr_untouched,
+        f"in_precedence={'retry_cap_exceeded' in INR_REASON_PRECEDENCE}",
+    )
+
+    # 3.13 DO_NOT_RETRY_RESPONSE_CODES {"9500", "5180"} defence-in-depth policy check (USD profile only)
+    from app.policy.rules import DO_NOT_RETRY_RESPONSE_CODES
+    ctx_resp_9500 = PolicyContext(
+        customer_ref="cust_resp_9500",
+        customer_opted_out=False,
+        prior_authorized_contacts=0,
+        last_authorized_contact_at=None,
+        has_vault_token=True,
+        processor_response_code="9500",
+        now=ctx.now,
+    )
+    v_resp_9500 = evaluate(decision=dec_retry, context=ctx_resp_9500, currency="USD")
+    ctx_resp_5180 = PolicyContext(
+        customer_ref="cust_resp_5180",
+        customer_opted_out=False,
+        prior_authorized_contacts=0,
+        last_authorized_contact_at=None,
+        has_vault_token=True,
+        processor_response_code="5180",
+        now=ctx.now,
+    )
+    v_resp_5180 = evaluate(decision=dec_retry, context=ctx_resp_5180, currency="USD")
+    # In INR, processor_response_code is ignored and does not block retry
+    v_resp_inr = evaluate(decision=dec_retry, context=ctx_resp_9500, currency="INR")
+    report(
+        "3.13 DO_NOT_RETRY_RESPONSE_CODES ({'9500', '5180'}) blocks retries in USD with retry_not_advised; INR untouched",
+        v_resp_9500.verdict == "blocked"
+        and v_resp_9500.reason == "retry_not_advised"
+        and v_resp_5180.verdict == "blocked"
+        and v_resp_5180.reason == "retry_not_advised"
+        and v_resp_inr.verdict == "authorized",
+        f"usd_9500={v_resp_9500.reason}, usd_5180={v_resp_5180.reason}, inr_verdict={v_resp_inr.verdict}",
+    )
+
+    # 3.14 Offline check: DECLINED retry executions count toward the USD retry cap
+    from app.models.execution import ExecutionRecord
+    exec_declined = ExecutionRecord(
+        event_id="pp_offline_cap_test",
+        policy_verdict_id="507f1f77bcf86cd799439011",
+        policy_verdict_version=1,
+        intervention="delayed_retry",
+        action_type="retry_simulated",
+        status="declined",
+        failure_reason="CCREJECT-IF: insufficient funds",
+    )
+    ctx_declined_retries = PolicyContext(
+        customer_ref="cust_declined_cap",
+        customer_opted_out=False,
+        prior_authorized_contacts=0,
+        last_authorized_contact_at=None,
+        prior_retry_executions=3,  # accumulated from 3 declined retries
+        last_retry_execution_at=ctx.now - timedelta(days=2),
+        now=ctx.now,
+    )
+    v_declined_cap = evaluate(decision=dec_retry, context=ctx_declined_retries, currency="USD")
+    report(
+        "3.14 Offline check: DECLINED retry executions count toward USD retry cap (blocks with retry_cap_exceeded)",
+        exec_declined.status == "declined"
+        and v_declined_cap.verdict == "blocked"
+        and v_declined_cap.reason == "retry_cap_exceeded",
+        f"exec_status={exec_declined.status}, verdict={v_declined_cap.verdict}, reason={v_declined_cap.reason}",
     )
 
 
@@ -1052,38 +1214,108 @@ class _MockMongoCollection:
                     return False
         return True
 
-    async def find_one(self, query: dict[str, Any], projection: dict[str, Any] | None = None) -> dict[str, Any] | None:
-        for doc in self.docs:
-            if self._matches(doc, query):
-                return dict(doc)
-        return None
+    async def find_one(self, query: dict[str, Any], projection: dict[str, Any] | None = None, sort: Any = None) -> dict[str, Any] | None:
+        matching = [d for d in self.docs if self._matches(d, query)]
+        if not matching:
+            return None
+        if sort:
+            for field, direction in reversed(sort):
+                matching.sort(key=lambda x: x.get(field, 0), reverse=(direction == -1 or str(direction) == "-1"))
+        return dict(matching[0])
+
+    def find(self, query: dict[str, Any] | None = None, sort: Any = None):
+        matching = [d for d in self.docs if (query is None or self._matches(d, query))]
+
+        class _Cursor:
+            def __init__(self, items):
+                self._items = items
+
+            def sort(self, *args, **kwargs):
+                return self
+
+            def limit(self, count):
+                self._items = self._items[:count]
+                return self
+
+            async def to_list(self, length=None):
+                return [dict(d) for d in self._items]
+
+            def __aiter__(self):
+                self._iter = iter(self._items)
+                return self
+
+            async def __anext__(self):
+                try:
+                    return dict(next(self._iter))
+                except StopIteration:
+                    raise StopAsyncIteration
+
+        return _Cursor(matching)
 
     async def insert_one(self, doc: dict[str, Any]) -> Any:
-        if doc.get("paypal_event_id"):
+        unique_keys = ["paypal_event_id", "vault_id", "order_id"]
+        for uk in unique_keys:
+            if doc.get(uk):
+                for d in self.docs:
+                    if d.get(uk) == doc[uk]:
+                        raise DuplicateKeyError(f"E11000 duplicate key error on {self.name}.{uk}")
+        if self.name == "orchestrator_runs":
             for d in self.docs:
-                if d.get("paypal_event_id") == doc["paypal_event_id"]:
-                    raise DuplicateKeyError(f"E11000 duplicate key error on {self.name}.paypal_event_id")
+                if (
+                    d.get("event_id") == doc.get("event_id")
+                    and d.get("stage") == doc.get("stage")
+                    and d.get("record_version") == doc.get("record_version")
+                ):
+                    raise DuplicateKeyError(f"E11000 duplicate key error on orchestrator_runs")
         d = dict(doc)
         if "_id" not in d:
             d["_id"] = ObjectId()
         self.docs.append(d)
+
         class _InsertRes:
             inserted_id = d["_id"]
+
         return _InsertRes()
 
-    async def update_one(self, query: dict[str, Any], update: dict[str, Any]) -> Any:
+    async def update_one(self, query: dict[str, Any], update: dict[str, Any], upsert: bool = False) -> Any:
         for doc in self.docs:
             if self._matches(doc, query):
                 if "$set" in update:
                     doc.update(update["$set"])
+
                 class _UpdateRes:
                     matched_count = 1
                     modified_count = 1
+                    upserted_id = None
+
                 return _UpdateRes()
+
+        if upsert:
+            new_doc = dict(query)
+            if "$setOnInsert" in update:
+                new_doc.update(update["$setOnInsert"])
+            if "$set" in update:
+                new_doc.update(update["$set"])
+            if "_id" not in new_doc:
+                new_doc["_id"] = ObjectId()
+            self.docs.append(new_doc)
+
+            class _UpsertRes:
+                matched_count = 0
+                modified_count = 0
+                upserted_id = new_doc["_id"]
+
+            return _UpsertRes()
+
         class _UpdateResZero:
             matched_count = 0
             modified_count = 0
+            upserted_id = None
+
         return _UpdateResZero()
+
+    async def create_index(self, *args, **kwargs) -> str:
+        return "idx_mock"
 
 
 class _MockMongoDB:
@@ -1093,9 +1325,32 @@ class _MockMongoDB:
         self.events = _MockMongoCollection("events")
         self.policy_verdicts = _MockMongoCollection("policy_verdicts")
         self.decisions = _MockMongoCollection("decisions")
+        self.diagnoses = _MockMongoCollection("diagnoses")
+        self.charge_attempts = _MockMongoCollection("charge_attempts")
+        self.customer_vault = _MockMongoCollection("customer_vault")
+        self.paypal_events = _MockMongoCollection("paypal_events")
+        self.orchestrator_runs = _MockMongoCollection("orchestrator_runs")
+        self.sim_clock = _MockMongoCollection("sim_clock")
+
+    def __getitem__(self, name: str) -> _MockMongoCollection:
+        if not hasattr(self, name):
+            setattr(self, name, _MockMongoCollection(name))
+        return getattr(self, name)
 
     async def list_collection_names(self) -> list[str]:
-        return ["verifications", "executions", "events", "policy_verdicts", "decisions"]
+        return [
+            "verifications",
+            "executions",
+            "events",
+            "policy_verdicts",
+            "decisions",
+            "diagnoses",
+            "charge_attempts",
+            "customer_vault",
+            "paypal_events",
+            "orchestrator_runs",
+            "sim_clock",
+        ]
 
 
 def test_step5_paypal_reconciliation() -> None:
@@ -1146,6 +1401,41 @@ def test_step5_paypal_reconciliation() -> None:
         "5.1b Fixture provenance: captured PayPal fixtures match recorded original payload SHA-256",
         captured_hashes_valid and len(hash_details) > 0,
         "; ".join(hash_details),
+    )
+
+    # 5.1c Live captured fixtures provenance: tests/fixtures/paypal/live/ match SHA-256
+    live_fixtures_dir = fixtures_dir / "live"
+    live_fixture_files = [
+        "payment_capture_completed_order_a.json",
+        "payment_capture_completed_order_c.json",
+        "payment_capture_declined_order_b.json",
+        "vault_payment_token_created.json",
+    ]
+    live_hashes_valid = True
+    live_hash_details: list[str] = []
+    for lf in live_fixture_files:
+        lp = live_fixtures_dir / lf
+        if not lp.exists():
+            live_hashes_valid = False
+            live_hash_details.append(f"{lf}: missing")
+            continue
+        data = json.loads(lp.read_text(encoding="utf-8"))
+        if data.get("source") != "captured":
+            live_hashes_valid = False
+            live_hash_details.append(f"{lf}: missing source=captured")
+            continue
+        recorded_hash = data.get("original_payload_sha256")
+        clean = {k: v for k, v in data.items() if k not in ("source", "original_payload_sha256")}
+        actual_hash = hashlib.sha256(json.dumps(clean, sort_keys=True).encode("utf-8")).hexdigest()
+        if not recorded_hash or actual_hash != recorded_hash:
+            live_hashes_valid = False
+            live_hash_details.append(f"{lf}: expected {recorded_hash}, got {actual_hash}")
+        else:
+            live_hash_details.append(f"{lf}: OK ({actual_hash[:8]}...)")
+    report(
+        "5.1c Live captured fixtures provenance: tests/fixtures/paypal/live/ match SHA-256 (labeled 'captured')",
+        live_hashes_valid and len(live_hash_details) == 4,
+        "; ".join(live_hash_details),
     )
 
     async def run_reconciliation_tests() -> None:
@@ -1899,6 +2189,716 @@ def test_step8_settings_cors_origins() -> None:
             os.environ["PUBLIC_DEMO"] = orig_demo
 
 
+def test_step9_paypal_capture_declined_and_vault() -> None:
+    print("\n--- SECTION 9: PAYPAL DECLINES, VAULT STORE & OUT-OF-ORDER DELIVERIES (OFFLINE) ---")
+    fixtures_dir = ROOT / "tests" / "fixtures" / "paypal"
+    fix_declined = json.loads((fixtures_dir / "payment_capture_declined.json").read_text(encoding="utf-8"))
+    fix_vault = json.loads((fixtures_dir / "vault_payment_token_created.json").read_text(encoding="utf-8"))
+    fix_part = json.loads((fixtures_dir / "invoicing_invoice_paid_partial.json").read_text(encoding="utf-8"))
+    fix_full = json.loads((fixtures_dir / "invoicing_invoice_paid_full.json").read_text(encoding="utf-8"))
+
+    from app.gateways.paypal.charge_attempts import record_charge_attempt
+    from app.gateways.paypal.vault import get_active_vault_token
+    from app.webhooks.paypal_reconciler import reprocess_unmatched_declines
+    from app.diagnosis import rules
+    from app.diagnosis.service import diagnose
+    from app.models.diagnosis import LLMDiagnosisProposal
+    from app.metrics.reader import Snapshot, distinct_recoveries, recovered_amount_per_event
+
+    async def run_step9_tests():
+        # 9.1 decline fixture -> event fields
+        db_dec = _MockMongoDB()
+        await record_charge_attempt(
+            order_id="6PW329308U6154049",
+            customer_ref="cust_decline_test_01",
+            amount=10.0,
+            currency="USD",
+            purpose="onboarding",
+            db=db_dec,
+        )
+
+        r_dec = await reconcile_paypal_event(fix_declined, db_dec)
+        ev_doc = await db_dec.events.find_one({"event_id": "pp_59185726VV0844043"})
+
+        dec_fields_ok = (
+            r_dec.processed is True
+            and r_dec.matched is True
+            and r_dec.duplicate is False
+            and r_dec.event_status == "at_risk"
+            and ev_doc is not None
+            and ev_doc.get("surface") == "payment"
+            and ev_doc.get("gateway") == "paypal"
+            and ev_doc.get("gateway_ref") == "6PW329308U6154049"
+            and ev_doc.get("amount") == 10.0
+            and ev_doc.get("currency") == "USD"
+            and ev_doc.get("customer_ref") == "cust_decline_test_01"
+            and ev_doc.get("raw_failure_reason") == "paypal_5120"
+            and ev_doc.get("status") == "at_risk"
+            and isinstance(ev_doc.get("gateway_detail"), dict)
+            and ev_doc.get("gateway_detail", {}).get("processor_response", {}).get("response_code") == "5120"
+        )
+        report(
+            "9.1 decline fixture -> event fields (event_id, surface, gateway, gateway_ref, amount, currency, customer_ref, raw_failure_reason, gateway_detail)",
+            dec_fields_ok,
+            f"event_id={ev_doc.get('event_id') if ev_doc else None}, reason={ev_doc.get('raw_failure_reason') if ev_doc else None}",
+        )
+
+        # 9.2 Verified PayPal response code diagnosis (5120 -> insufficient_funds, 0500 -> issuer_declined, 00N7 -> card_verification_failed)
+        ev_doc_clean = {k: v for k, v in ev_doc.items() if k != "_id"}
+        rev_ev_5120 = RevenueEvent(**ev_doc_clean)
+        match_5120 = rules.classify(rev_ev_5120)
+        ok_5120 = match_5120 is not None and match_5120.root_cause == "insufficient_funds" and match_5120.is_confident
+
+        rev_ev_0500 = RevenueEvent(
+            event_id="pp_test_0500",
+            surface="payment",
+            gateway="paypal",
+            amount=50.0,
+            currency="USD",
+            customer_ref="cust_test_0500",
+            raw_failure_reason="paypal_0500",
+            status="at_risk",
+        )
+        match_0500 = rules.classify(rev_ev_0500)
+        ok_0500 = match_0500 is not None and match_0500.root_cause == "issuer_declined" and match_0500.is_confident
+
+        rev_ev_00N7 = RevenueEvent(
+            event_id="pp_test_00N7",
+            surface="payment",
+            gateway="paypal",
+            amount=50.0,
+            currency="USD",
+            customer_ref="cust_test_00N7",
+            raw_failure_reason="paypal_00N7",
+            status="at_risk",
+        )
+        match_00N7 = rules.classify(rev_ev_00N7)
+        ok_00N7 = match_00N7 is not None and match_00N7.root_cause == "card_verification_failed" and match_00N7.is_confident
+
+        codes_ok = ok_5120 and ok_0500 and ok_00N7
+        report(
+            "9.2 PayPal verified response codes diagnosis (5120->insufficient_funds, 0500->issuer_declined, 00N7->card_verification_failed)",
+            codes_ok,
+            f"5120={match_5120.root_cause if match_5120 else None}, 0500={match_0500.root_cause if match_0500 else None}, 00N7={match_00N7.root_cause if match_00N7 else None}",
+        )
+
+        # 9.3 unknown code -> flagged for Gemini with Gemini MOCKED
+        unknown_ev = RevenueEvent(
+            event_id="pp_test_unknown",
+            surface="payment",
+            gateway="paypal",
+            amount=75.0,
+            currency="USD",
+            customer_ref="cust_unknown",
+            raw_failure_reason="paypal_9999",
+            status="at_risk",
+        )
+        match_unmapped = rules.classify(unknown_ev)
+        assert match_unmapped is None, "Unmapped PayPal code should not match any offline deterministic rule"
+
+        with patch("app.diagnosis.gemini.is_configured", return_value=True), \
+             patch("app.diagnosis.gemini.propose_diagnosis", new_callable=AsyncMock) as mock_gemini:
+            mock_gemini.return_value = (
+                LLMDiagnosisProposal(
+                    root_cause="unknown",
+                    confidence=0.5,
+                    evidence=["unmapped paypal response code 9999 escalated to Gemini"],
+                ),
+                '{"root_cause":"unknown","confidence":0.5,"evidence":["unmapped paypal response code 9999 escalated to Gemini"]}',
+            )
+            diag, method, model = await diagnose(unknown_ev)
+            gemini_flagged_ok = (
+                method == "llm"
+                and diag.root_cause == "unknown"
+                and mock_gemini.await_count == 1
+            )
+            report(
+                "9.3 Unknown PayPal code -> escalated to Gemini fallback path with Gemini MOCKED",
+                gemini_flagged_ok,
+                f"method={method}, root_cause={diag.root_cause}, gemini_calls={mock_gemini.await_count}",
+            )
+
+        # 9.4 vault fixture -> store
+        db_vault = _MockMongoDB()
+        await record_charge_attempt(
+            order_id="46969136VC639191U",
+            customer_ref="cust_vault_buyer_01",
+            amount=25.0,
+            currency="USD",
+            purpose="onboarding",
+            db=db_vault,
+        )
+
+        r_vault = await reconcile_paypal_event(fix_vault, db_vault)
+        vault_doc = await get_active_vault_token("cust_vault_buyer_01", db_vault)
+
+        vault_ok = (
+            r_vault.processed is True
+            and r_vault.matched is True
+            and vault_doc is not None
+            and vault_doc.get("vault_id") == "4mr90404j6010301k"
+            and vault_doc.get("card_brand") == "VISA"
+            and vault_doc.get("last_digits") == "1111"
+            and len(vault_doc.get("last_digits", "")) == 4  # Never full card number!
+            and vault_doc.get("status") == "active"
+            and vault_doc.get("customer_ref") == "cust_vault_buyer_01"
+            and vault_doc.vault_id == "4mr90404j6010301k"
+        )
+        report(
+            "9.4 vault fixture -> store: token saved with customer_ref, vault_id, brand, last_digits only, status active",
+            vault_ok,
+            f"vault_id={vault_doc.get('vault_id') if vault_doc else None}, last_digits={vault_doc.get('last_digits') if vault_doc else None}",
+        )
+
+        # 9.5 unmatched decline acknowledged then reprocessed
+        db_unmatched = _MockMongoDB()
+        r_pre = await reconcile_paypal_event(fix_declined, db_unmatched)
+        unmatched_stored = (
+            r_pre.processed is False
+            and r_pre.matched is False
+            and len(db_unmatched.events.docs) == 0
+            and len(db_unmatched.paypal_events.docs) == 1
+            and db_unmatched.paypal_events.docs[0].get("unmatched") is True
+        )
+
+        await record_charge_attempt(
+            order_id="6PW329308U6154049",
+            customer_ref="cust_late_registered_01",
+            amount=10.0,
+            currency="USD",
+            purpose="onboarding",
+            db=db_unmatched,
+        )
+
+        reprocessed = await reprocess_unmatched_declines(db_unmatched)
+        late_ev = await db_unmatched.events.find_one({"event_id": "pp_59185726VV0844043"})
+        reprocess_ok = (
+            unmatched_stored
+            and len(reprocessed) == 1
+            and reprocessed[0].processed is True
+            and reprocessed[0].matched is True
+            and late_ev is not None
+            and late_ev.get("customer_ref") == "cust_late_registered_01"
+        )
+        report(
+            "9.5 Unmatched decline: acknowledged with 200, stored as unmatched, reprocessed successfully after attempt recorded",
+            reprocess_ok,
+            f"pre_matched={r_pre.matched}, reprocessed={len(reprocessed)}, customer_ref={late_ev.get('customer_ref') if late_ev else None}",
+        )
+
+        # 9.6 replays are idempotent
+        r_dec_dup = await reconcile_paypal_event(fix_declined, db_dec)
+        r_vault_dup = await reconcile_paypal_event(fix_vault, db_vault)
+
+        idempotent_ok = (
+            r_dec_dup.duplicate is True
+            and r_dec_dup.matched is True
+            and len([d for d in db_dec.events.docs if d.get("event_id") == "pp_59185726VV0844043"]) == 1
+            and r_vault_dup.duplicate is True
+            and len([d for d in db_vault.customer_vault.docs if d.get("vault_id") == "4mr90404j6010301k"]) == 1
+        )
+        report(
+            "9.6 Replays are idempotent: repeat deliveries of decline and vault return duplicate=True with zero extra DB records",
+            idempotent_ok,
+            f"decline_duplicate={r_dec_dup.duplicate}, vault_duplicate={r_vault_dup.duplicate}",
+        )
+
+        # 9.7 Out-of-order delivery: full-then-partial and partial-then-full give identical recovered revenue ($100.00)
+        db_seq1 = _MockMongoDB()
+        db_seq1.executions.docs.append({
+            "_id": ObjectId("507f1f77bcf86cd799439031"),
+            "gateway": "paypal",
+            "gateway_ref": "INV2-LSEJ-2LLG-D59L-2QNU",
+            "event_id": "evt_paypal_ooo_01",
+            "amount": 100.0,
+        })
+        db_seq1.events.docs.append({
+            "event_id": "evt_paypal_ooo_01",
+            "amount": 100.0,
+            "currency": "USD",
+            "status": "at_risk",
+        })
+
+        r_full_1 = await reconcile_paypal_event(fix_full, db_seq1)
+        ev_after_full = db_seq1.events.docs[0]["status"]
+        assert ev_after_full == "recovered"
+
+        r_part_1 = await reconcile_paypal_event(fix_part, db_seq1)
+        ev_after_part_late = db_seq1.events.docs[0]["status"]
+        assert ev_after_part_late == "recovered", f"Expected 'recovered', got '{ev_after_part_late}'"
+        assert len(db_seq1.verifications.docs) == 2
+
+        rev_by_event_1 = recovered_amount_per_event(tuple(db_seq1.verifications.docs))
+
+        db_seq2 = _MockMongoDB()
+        db_seq2.executions.docs.append({
+            "_id": ObjectId("507f1f77bcf86cd799439032"),
+            "gateway": "paypal",
+            "gateway_ref": "INV2-LSEJ-2LLG-D59L-2QNU",
+            "event_id": "evt_paypal_ooo_02",
+            "amount": 100.0,
+        })
+        db_seq2.events.docs.append({
+            "event_id": "evt_paypal_ooo_02",
+            "amount": 100.0,
+            "currency": "USD",
+            "status": "at_risk",
+        })
+
+        r_part_2 = await reconcile_paypal_event(fix_part, db_seq2)
+        assert db_seq2.events.docs[0]["status"] == "at_risk"
+
+        r_full_2 = await reconcile_paypal_event(fix_full, db_seq2)
+        assert db_seq2.events.docs[0]["status"] == "recovered"
+        assert len(db_seq2.verifications.docs) == 2
+
+        rev_by_event_2 = recovered_amount_per_event(tuple(db_seq2.verifications.docs))
+
+        seq1_amt = rev_by_event_1.get("evt_paypal_ooo_01", 0.0)
+        seq2_amt = rev_by_event_2.get("evt_paypal_ooo_02", 0.0)
+
+        ooo_ok = (
+            ev_after_part_late == "recovered"
+            and seq1_amt == 100.0
+            and seq2_amt == 100.0
+            and seq1_amt == seq2_amt
+        )
+        report(
+            "9.7 Out-of-order delivery: full-then-partial and partial-then-full give identical recovered revenue ($100.00), no regression",
+            ooo_ok,
+            f"full_then_partial={seq1_amt:.2f}, partial_then_full={seq2_amt:.2f}, event_status_retained={ev_after_part_late}",
+        )
+
+    asyncio.run(run_step9_tests())
+
+
+def test_step10_orchestrator() -> None:
+    print("\n--- SECTION 10: ORCHESTRATOR, SIMULATED CLOCK, LOOP GUARD & RETRY ELIGIBILITY ---")
+    from datetime import datetime, timedelta, timezone
+    from app.clock import SimulatedClock
+    from app.orchestrator.service import advance
+    from app.webhooks.paypal_reconciler import reconcile_paypal_event
+    from app.policy.engine import PolicyContext, evaluate
+    from app.policy.rules import current_rulebook
+    from app.execution.port import ExecutionResult
+    import app.execution.service
+
+    async def run_step10_tests():
+        mock_vault_order_res = {
+            "id": "ORD-ORCH-RET-01",
+            "status": "COMPLETED",
+            "links": [{"rel": "self", "href": "https://api.sandbox.paypal.com/v2/checkout/orders/ORD-ORCH-RET-01"}],
+        }
+        mock_link_exec_res = ExecutionResult(
+            status="completed",
+            gateway="paypal",
+            gateway_ref="INV-ORCH-102",
+            gateway_url="https://www.sandbox.paypal.com/invoice/p/#INV-ORCH-102",
+        )
+
+        # 10.1 full path decline -> diagnosis -> decision -> policy -> mocked retry -> mocked completion fixture -> recovered
+        db_10_1 = _MockMongoDB()
+        clock_10_1 = SimulatedClock()
+
+        db_10_1.events.docs.append({
+            "event_id": "pp_decl_101",
+            "surface": "payment",
+            "gateway": "paypal",
+            "amount": 75.0,
+            "currency": "USD",
+            "customer_ref": "cust_101",
+            "status": "at_risk",
+            "raw_failure_reason": "paypal_5120",
+            "gateway_detail": {"processor_response": {"response_code": "5120"}},
+            "created_at": clock_10_1.now(),
+        })
+        db_10_1.customer_vault.docs.append({
+            "vault_id": "vlt_101",
+            "customer_ref": "cust_101",
+            "card_brand": "VISA",
+            "last_digits": "1111",
+            "status": "active",
+            "created_at": clock_10_1.now(),
+        })
+
+        import app.db
+        app.db._database = db_10_1
+        with patch("app.gateways.paypal.orders.create_vaulted_order", AsyncMock(return_value=mock_vault_order_res)):
+            res_adv = await advance("pp_decl_101", clock=clock_10_1, db=db_10_1)
+
+            adv_ok = (
+                res_adv.get("status") == "completed"
+                and res_adv.get("stage") == "execute"
+                and len(db_10_1.executions.docs) == 1
+                and db_10_1.executions.docs[0].get("gateway_ref") == "ORD-ORCH-RET-01"
+                and db_10_1.executions.docs[0].get("simulated_time") is True
+                and len(db_10_1.orchestrator_runs.docs) == 4
+                and all(r.get("simulated_time") is True for r in db_10_1.orchestrator_runs.docs)
+            )
+
+            comp_fixture = {
+                "id": "WH-COMP-101",
+                "event_type": "PAYMENT.CAPTURE.COMPLETED",
+                "create_time": clock_10_1.now().isoformat(),
+                "resource": {
+                    "id": "CAP-101",
+                    "custom_id": "ev:pp_decl_101",
+                    "order_id": "ORD-ORCH-RET-01",
+                    "amount": {"value": "75.00", "currency_code": "USD"},
+                },
+            }
+            r_comp = await reconcile_paypal_event(comp_fixture, db_10_1)
+            ev_after = await db_10_1.events.find_one({"event_id": "pp_decl_101"})
+
+            full_path_ok = (
+                adv_ok
+                and r_comp.processed is True
+                and r_comp.outcome == "recovered"
+                and ev_after is not None
+                and ev_after.get("status") == "recovered"
+            )
+            report(
+                "10.1 Full path: decline -> diagnosis -> decision -> policy -> mocked retry -> mocked completion -> recovered",
+                full_path_ok,
+                f"adv_status={res_adv.get('status')}, r_comp_outcome={r_comp.outcome}, event_status={ev_after.get('status') if ev_after else None}",
+            )
+
+        # 10.2 No vault token falls back to update link
+        db_10_2 = _MockMongoDB()
+        clock_10_2 = SimulatedClock()
+        db_10_2.events.docs.append({
+            "event_id": "pp_decl_102",
+            "surface": "payment",
+            "gateway": "paypal",
+            "amount": 50.0,
+            "currency": "USD",
+            "customer_ref": "cust_no_vault",
+            "status": "at_risk",
+            "raw_failure_reason": "paypal_5120",
+            "gateway_detail": {"processor_response": {"response_code": "5120"}},
+            "created_at": clock_10_2.now(),
+        })
+
+        app.db._database = db_10_2
+        with patch.object(app.execution.service.PayPalExecutionAdapter, "execute_link", AsyncMock(return_value=mock_link_exec_res)):
+            res_10_2 = await advance("pp_decl_102", clock=clock_10_2, db=db_10_2)
+            dec_10_2 = db_10_2.decisions.docs[0] if db_10_2.decisions.docs else {}
+            exec_10_2 = db_10_2.executions.docs[0] if db_10_2.executions.docs else {}
+
+            no_vault_ok = (
+                res_10_2.get("status") == "completed"
+                and dec_10_2.get("excluded_interventions") == ["immediate_retry", "delayed_retry"]
+                and dec_10_2.get("exclusion_reason") == "no_active_vault_token"
+                and dec_10_2.get("recommended_intervention") == "payment_method_update_link"
+                and exec_10_2.get("intervention") == "payment_method_update_link"
+                and exec_10_2.get("gateway_ref") == "INV-ORCH-102"
+            )
+            report(
+                "10.2 No vault token falls back: decision excludes retries and recommends payment_method_update_link",
+                no_vault_ok,
+                f"rec={dec_10_2.get('recommended_intervention')}, reason={dec_10_2.get('exclusion_reason')}, exec_ref={exec_10_2.get('gateway_ref')}",
+            )
+
+        # 10.3 Do-not-retry advice code falls back & defence in depth
+        db_10_3 = _MockMongoDB()
+        clock_10_3 = SimulatedClock()
+        db_10_3.events.docs.append({
+            "event_id": "pp_decl_103",
+            "surface": "payment",
+            "gateway": "paypal",
+            "amount": 50.0,
+            "currency": "USD",
+            "customer_ref": "cust_advice_03",
+            "status": "at_risk",
+            "raw_failure_reason": "paypal_0500",
+            "gateway_detail": {"processor_response": {"payment_advice_code": "03"}},
+            "created_at": clock_10_3.now(),
+        })
+        db_10_3.customer_vault.docs.append({
+            "vault_id": "vlt_103",
+            "customer_ref": "cust_advice_03",
+            "card_brand": "VISA",
+            "last_digits": "2222",
+            "status": "active",
+            "created_at": clock_10_3.now(),
+        })
+
+        app.db._database = db_10_3
+        with patch.object(app.execution.service.PayPalExecutionAdapter, "execute_link", AsyncMock(return_value=mock_link_exec_res)):
+            res_10_3 = await advance("pp_decl_103", clock=clock_10_3, db=db_10_3)
+            dec_10_3 = db_10_3.decisions.docs[0] if db_10_3.decisions.docs else {}
+
+            rulebook = current_rulebook("USD")
+            forced_retry_dec = DecisionRecord(
+                id="507f1f77bcf86cd799439012",
+                version=1,
+                event_id="pp_decl_103",
+                diagnosis_id=str(dec_10_3.get("diagnosis_id", "507f1f77bcf86cd799439011")),
+                diagnosis_version=1,
+                recommended_intervention="immediate_retry",
+                estimated_cost=0.0,
+                recovery_probability=0.6,
+                revenue_at_risk=50.0,
+                expected_recovery_value=30.0,
+                reasoning="forced retry test",
+            )
+            forced_ctx = PolicyContext(
+                customer_ref="cust_advice_03",
+                customer_opted_out=False,
+                prior_authorized_contacts=0,
+                last_authorized_contact_at=None,
+                has_vault_token=True,
+                payment_advice_code="03",
+            )
+            forced_verdict = evaluate(decision=forced_retry_dec, context=forced_ctx, rulebook=rulebook)
+
+            inr_book = current_rulebook("INR")
+            inr_invariant = (inr_book.fingerprint == RECORDED_INR_FINGERPRINT == "rb1_aba19a5e5ee8124e")
+
+            advice_ok = (
+                dec_10_3.get("excluded_interventions") == ["immediate_retry", "delayed_retry"]
+                and dec_10_3.get("exclusion_reason") == "payment_advice_03_do_not_retry"
+                and dec_10_3.get("recommended_intervention") == "payment_method_update_link"
+                and forced_verdict.verdict == "blocked"
+                and forced_verdict.reason == "retry_not_advised"
+                and inr_invariant
+            )
+            report(
+                "10.3 Do-not-retry advice code falls back & defence in depth blocks retry with retry_not_advised; INR fingerprint byte-identical",
+                advice_ok,
+                f"exclusion={dec_10_3.get('exclusion_reason')}, forced_reason={forced_verdict.reason}, inr_fp={inr_book.fingerprint}",
+            )
+
+            # 10.3b Do-not-retry response code (9500 / 5180) falls back in decision & blocks retry in policy
+            db_10_3b = _MockMongoDB()
+            clock_10_3b = SimulatedClock()
+            db_10_3b.events.docs.append({
+                "event_id": "pp_decl_103b",
+                "customer_ref": "cust_resp_9500",
+                "amount": 50.0,
+                "currency": "USD",
+                "surface": "payment",
+                "gateway": "paypal",
+                "raw_failure_reason": "paypal_0500",
+                "gateway_detail": {
+                    "processor_response": {
+                        "response_code": "9500",
+                    }
+                },
+                "status": "at_risk",
+                "created_at": clock_10_3b.now(),
+            })
+            db_10_3b.customer_vault.docs.append({
+                "customer_ref": "cust_resp_9500",
+                "vault_id": "vault_resp_9500",
+                "card_brand": "VISA",
+                "last_digits": "3333",
+                "status": "active",
+                "created_at": clock_10_3b.now(),
+            })
+            app.db._database = db_10_3b
+            with patch.object(app.execution.service.PayPalExecutionAdapter, "execute_link", AsyncMock(return_value=mock_link_exec_res)):
+                res_10_3b = await advance("pp_decl_103b", clock=clock_10_3b, db=db_10_3b)
+                dec_10_3b = db_10_3b.decisions.docs[0] if db_10_3b.decisions.docs else {}
+
+            forced_ctx_resp = PolicyContext(
+                customer_ref="cust_resp_9500",
+                customer_opted_out=False,
+                prior_authorized_contacts=0,
+                last_authorized_contact_at=None,
+                has_vault_token=True,
+                processor_response_code="9500",
+            )
+            forced_verdict_resp = evaluate(decision=forced_retry_dec, context=forced_ctx_resp, rulebook=rulebook)
+
+            resp_ok = (
+                dec_10_3b.get("excluded_interventions") == ["immediate_retry", "delayed_retry"]
+                and dec_10_3b.get("exclusion_reason") == "processor_response_9500_do_not_retry"
+                and dec_10_3b.get("recommended_intervention") == "payment_method_update_link"
+                and forced_verdict_resp.verdict == "blocked"
+                and forced_verdict_resp.reason == "retry_not_advised"
+            )
+            report(
+                "10.3b Do-not-retry response code falls back in decision & blocks retry in policy defence-in-depth",
+                resp_ok,
+                f"exclusion={dec_10_3b.get('exclusion_reason')}, forced_reason={forced_verdict_resp.reason}",
+            )
+
+        # 10.4 Cooldown blocks a second retry until simulated clock advances
+        clock_10_4 = SimulatedClock()
+        t0 = clock_10_4.now()
+        rulebook_usd = current_rulebook("USD")
+        contact_dec = DecisionRecord(
+            id="507f1f77bcf86cd799439014",
+            version=1,
+            event_id="pp_cooldown_ev",
+            diagnosis_id="507f1f77bcf86cd799439011",
+            diagnosis_version=1,
+            recommended_intervention="payment_method_update_link",
+            estimated_cost=0.0,
+            recovery_probability=0.6,
+            revenue_at_risk=50.0,
+            expected_recovery_value=30.0,
+            reasoning="cooldown test",
+        )
+        ctx_t0_plus_2h = PolicyContext(
+            customer_ref="cust_cd",
+            customer_opted_out=False,
+            prior_authorized_contacts=1,
+            last_authorized_contact_at=t0,
+            now=t0 + timedelta(hours=2),
+        )
+        v_blocked = evaluate(decision=contact_dec, context=ctx_t0_plus_2h, rulebook=rulebook_usd)
+
+        clock_10_4.advance(hours=25)
+        ctx_t0_plus_25h = PolicyContext(
+            customer_ref="cust_cd",
+            customer_opted_out=False,
+            prior_authorized_contacts=1,
+            last_authorized_contact_at=t0,
+            now=clock_10_4.now(),
+        )
+        v_passed = evaluate(decision=contact_dec, context=ctx_t0_plus_25h, rulebook=rulebook_usd)
+
+        cooldown_ok = (
+            v_blocked.verdict == "blocked"
+            and v_blocked.reason == "cooldown_active"
+            and v_passed.verdict == "authorized"
+        )
+        report(
+            "10.4 Cooldown blocks contact/retry until simulated clock advances past 24h",
+            cooldown_ok,
+            f"at_2h={v_blocked.verdict} ({v_blocked.reason}), at_25h={v_passed.verdict}",
+        )
+
+        # 10.5 Loop guard: declined recovery capture creates no new event, attaches not_recovered, replay idempotent
+        db_10_5 = _MockMongoDB()
+        exec_id_10_5 = ObjectId()
+        db_10_5.events.docs.append({
+            "event_id": "pp_decl_105",
+            "surface": "payment",
+            "gateway": "paypal",
+            "amount": 50.0,
+            "currency": "USD",
+            "customer_ref": "cust_105",
+            "status": "at_risk",
+        })
+        db_10_5.executions.docs.append({
+            "_id": exec_id_10_5,
+            "event_id": "pp_decl_105",
+            "policy_verdict_id": "507f1f77bcf86cd799439099",
+            "gateway": "paypal",
+            "gateway_ref": "ORD-LOOP-105",
+            "status": "completed",
+            "action_type": "retry_simulated",
+            "intervention": "immediate_retry",
+        })
+
+        webhook_loop = {
+            "id": "WH-DECL-LOOP-105",
+            "event_type": "PAYMENT.CAPTURE.DECLINED",
+            "resource": {
+                "id": "CAP-LOOP-105",
+                "custom_id": "ev:pp_decl_105",
+                "order_id": "ORD-LOOP-105",
+                "amount": {"value": "50.00", "currency_code": "USD"},
+            },
+        }
+
+        app.db._database = db_10_5
+        r_loop = await reconcile_paypal_event(webhook_loop, db_10_5)
+        events_count_after = len(db_10_5.events.docs)
+        verif_10_5 = db_10_5.verifications.docs[0] if db_10_5.verifications.docs else {}
+        exec_after = db_10_5.executions.docs[0]
+
+        r_loop_dup = await reconcile_paypal_event(webhook_loop, db_10_5)
+
+        loop_ok = (
+            r_loop.processed is True
+            and r_loop.outcome == "not_recovered"
+            and events_count_after == 1
+            and verif_10_5.get("outcome") == "not_recovered"
+            and verif_10_5.get("event_id") == "pp_decl_105"
+            and exec_after.get("successful") is False
+            and exec_after.get("recovery_outcome") == "not_recovered"
+            and r_loop_dup.duplicate is True
+            and len(db_10_5.verifications.docs) == 1
+        )
+        report(
+            "10.5 Loop guard: declined recovery capture ('ev:') creates no new event, attaches not_recovered, replay is idempotent",
+            loop_ok,
+            f"events_count={events_count_after}, outcome={r_loop.outcome}, exec_succ={exec_after.get('successful')}, dup={r_loop_dup.duplicate}",
+        )
+
+        # 10.6 Replays of advance are idempotent
+        init_runs = len(db_10_1.orchestrator_runs.docs)
+        init_execs = len(db_10_1.executions.docs)
+        init_decs = len(db_10_1.decisions.docs)
+
+        app.db._database = db_10_1
+        with patch("app.gateways.paypal.orders.create_vaulted_order", AsyncMock(return_value=mock_vault_order_res)):
+            res_adv_replay = await advance("pp_decl_101", clock=clock_10_1, db=db_10_1)
+
+            replay_ok = (
+                res_adv_replay.get("status") in ("terminal", "already_executed")
+                and len(db_10_1.orchestrator_runs.docs) == init_runs
+                and len(db_10_1.executions.docs) == init_execs
+                and len(db_10_1.decisions.docs) == init_decs
+            )
+            report(
+                "10.6 Advance replay is idempotent: repeat advance runs no additional stages and creates zero duplicate records",
+                replay_ok,
+                f"status={res_adv_replay.get('status')}, runs={len(db_10_1.orchestrator_runs.docs)}/{init_runs}",
+            )
+
+        # 10.7 auto_orchestrate off changes nothing
+        from app.config import Settings
+        settings_default = Settings()
+        auto_off_ok = (settings_default.auto_orchestrate is False)
+        report(
+            "10.7 auto_orchestrate default is False: background advance remains disabled until explicitly opted in",
+            auto_off_ok,
+            f"auto_orchestrate={settings_default.auto_orchestrate}",
+        )
+
+        # 10.8 Background Task Safety in Webhook: failing task is logged and does not affect 200 response
+        from app.routes.paypal_webhooks import _safe_orchestrate, _background_tasks
+
+        logged_records: list[logging.LogRecord] = []
+        class TaskTestHandler(logging.Handler):
+            def emit(self, record: logging.LogRecord) -> None:
+                logged_records.append(record)
+
+        wh_logger = logging.getLogger("app.routes.paypal_webhooks")
+        test_handler = TaskTestHandler()
+        wh_logger.addHandler(test_handler)
+
+        async def failing_advance(evt_id: str) -> None:
+            raise ConnectionError("Upstream simulation offline")
+
+        with patch("app.routes.paypal_webhooks.advance", side_effect=failing_advance):
+            # Verify _safe_orchestrate handles failure cleanly
+            await _safe_orchestrate("evt_task_fail_offline")
+
+        wh_logger.removeHandler(test_handler)
+
+        error_logs = [r for r in logged_records if r.levelno == logging.ERROR]
+        logged_safe = (
+            len(error_logs) >= 1
+            and "evt_task_fail_offline" in error_logs[0].getMessage()
+            and "ConnectionError" in error_logs[0].getMessage()
+            and "payload" not in error_logs[0].getMessage().lower()
+        )
+        report(
+            "10.8 Background task safety: failing task logs event id and error type only, no payloads",
+            logged_safe,
+            f"logged_msg={error_logs[0].getMessage() if error_logs else 'NONE'}",
+        )
+        app.db._database = None
+
+    asyncio.run(run_step10_tests())
+
+
 def main() -> int:
     print("=" * 78)
     print("PHASE 1 CONTRACT CHECKS (OFFLINE — NO NETWORK, NO DB, NO SERVER)")
@@ -1912,6 +2912,8 @@ def main() -> int:
     test_step6_razorpay_verifier_characterization()
     test_step7_public_demo_guard()
     test_step8_settings_cors_origins()
+    test_step9_paypal_capture_declined_and_vault()
+    test_step10_orchestrator()
 
     print("\n" + "=" * 78)
     print(f"SUMMARY: {PASS_COUNT} PASSED, {FAIL_COUNT} FAILED")

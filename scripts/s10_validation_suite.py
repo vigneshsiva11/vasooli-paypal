@@ -20,6 +20,11 @@ realistic input. That needs real calls and is `scripts/s10_live_extraction.py`.
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
 
 from pydantic import ValidationError
 

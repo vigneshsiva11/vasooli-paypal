@@ -89,6 +89,16 @@ class PolicyContext:
     #: Evaluation time, injected so a verdict is reproducible rather than
     #: depending on when the audit happens to run.
     now: datetime = field(default_factory=_utc_now)
+    #: Whether customer has an active payment vault token for automated retries.
+    has_vault_token: bool = True
+    #: Card network payment advice code from decline gateway details.
+    payment_advice_code: str | None = None
+    #: Number of prior retry executions recorded for this event.
+    prior_retry_executions: int = 0
+    #: When the most recent retry execution occurred, or None if none.
+    last_retry_execution_at: datetime | None = None
+    #: Processor response code from decline gateway details.
+    processor_response_code: str | None = None
 
     def __post_init__(self) -> None:
         if not self.customer_ref:
@@ -117,6 +127,32 @@ class PolicyContext:
                 f"{self.prior_authorized_contacts} but no timestamp was given "
                 "for the most recent one"
             )
+        if self.prior_retry_executions < 0:
+            raise ValueError(
+                f"prior_retry_executions cannot be negative "
+                f"({self.prior_retry_executions})"
+            )
+        if self.last_retry_execution_at is not None:
+            if self.last_retry_execution_at.tzinfo is None:
+                raise ValueError(
+                    "last_retry_execution_at must be timezone-aware"
+                )
+            if self.prior_retry_executions == 0:
+                raise ValueError(
+                    "last_retry_execution_at is set but "
+                    "prior_retry_executions is 0; the two describe the same "
+                    "history and cannot disagree"
+                )
+        elif self.prior_retry_executions > 0:
+            raise ValueError(
+                f"prior_retry_executions is "
+                f"{self.prior_retry_executions} but no timestamp was given "
+                "for the most recent one"
+            )
+
+
+DO_NOT_RETRY_ADVICE_CODES: frozenset[str] = frozenset({"03"})
+DO_NOT_RETRY_RESPONSE_CODES: frozenset[str] = frozenset({"9500", "5180"})
 
 
 @dataclass(frozen=True)
@@ -148,7 +184,9 @@ class CheckOutcome:
 # ---------------------------------------------------------------------------
 
 
-def _check_actionable(decision: DecisionRecord, rulebook: Rulebook) -> CheckOutcome:
+def _check_actionable(
+    decision: DecisionRecord, context: PolicyContext, rulebook: Rulebook
+) -> CheckOutcome:
     """Is there an action here at all?
 
     Stage 3 can conclude that nothing should be done. Authorizing that would
@@ -166,6 +204,56 @@ def _check_actionable(decision: DecisionRecord, rulebook: Rulebook) -> CheckOutc
             ),
             reason="no_action_recommended",
         )
+    # Defence in depth: check retry eligibility for USD / PayPal retries
+    if intervention in ("immediate_retry", "delayed_retry"):
+        if not getattr(context, "has_vault_token", True):
+            return CheckOutcome(
+                name="decision_is_actionable",
+                passed=False,
+                detail=f"customer {context.customer_ref} has no active vault token for retry",
+                reason="retry_not_advised",
+            )
+        advice_code = getattr(context, "payment_advice_code", None)
+        if advice_code in DO_NOT_RETRY_ADVICE_CODES:
+            return CheckOutcome(
+                name="decision_is_actionable",
+                passed=False,
+                detail=f"payment advice code {advice_code} indicates do not retry",
+                reason="retry_not_advised",
+            )
+        resp_code = getattr(context, "processor_response_code", None)
+        do_not_retry_codes = rulebook.do_not_retry_response_codes or DO_NOT_RETRY_RESPONSE_CODES
+        if resp_code in do_not_retry_codes and rulebook.tier_currency == "USD":
+            return CheckOutcome(
+                name="decision_is_actionable",
+                passed=False,
+                detail=f"processor response code {resp_code} indicates do not retry",
+                reason="retry_not_advised",
+            )
+        if rulebook.tier_currency == "USD":
+            if context.prior_retry_executions >= 3:
+                return CheckOutcome(
+                    name="decision_is_actionable",
+                    passed=False,
+                    detail=(
+                        f"retry cap reached: {context.prior_retry_executions} prior retry executions "
+                        "for event (maximum 3)"
+                    ),
+                    reason="retry_cap_exceeded",
+                )
+            if context.last_retry_execution_at is not None:
+                gap = context.now - context.last_retry_execution_at
+                if gap < timedelta(hours=24):
+                    hours_elapsed = gap.total_seconds() / 3600.0
+                    return CheckOutcome(
+                        name="decision_is_actionable",
+                        passed=False,
+                        detail=(
+                            f"retry cooldown active: {hours_elapsed:.1f}h since last retry "
+                            f"execution (minimum 24h)"
+                        ),
+                        reason="retry_cap_exceeded",
+                    )
     return CheckOutcome(
         name="decision_is_actionable",
         passed=True,
@@ -443,7 +531,7 @@ def run_checks(
     book = current_rulebook(currency or "INR") if rulebook is None else rulebook
 
     outcomes = [
-        _check_actionable(decision, book),
+        _check_actionable(decision, context, book),
         _check_opt_out(decision, context, book),
         _check_contact_cap(decision, context, book),
         _check_cooldown(decision, context, book),

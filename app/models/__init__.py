@@ -11,6 +11,13 @@ from app.models.decision import (
     InterventionName,
     expected_recovery_value,
 )
+from app.models.charge_attempt import (
+    ChargeAttempt,
+    ChargeAttemptPurpose,
+)
+from app.models.vault import (
+    CustomerVaultToken,
+)
 from app.models.diagnosis import (
     ALLOWED_ROOT_CAUSES,
     MAX_EVIDENCE_ITEMS,

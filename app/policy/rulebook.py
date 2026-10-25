@@ -126,6 +126,7 @@ class Rulebook:
     # -- Currency profile extensions (optional; omitted from digest when None)
     fx_rate_inr_per_usd: float | None = field(default=None)
     intervention_costs: tuple[tuple[str, float], ...] | None = field(default=None)
+    do_not_retry_response_codes: tuple[str, ...] | None = field(default=None)
 
     #: Human note on what this rulebook was and when. Documentation only —
     #: excluded from the fingerprint, so rewording an archive entry cannot change

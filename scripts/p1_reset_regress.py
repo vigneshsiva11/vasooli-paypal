@@ -49,6 +49,9 @@ async def reset_regress_db() -> int:
         from app.policy import ensure_indexes as ensure_policy_indexes
         from app.ptp import ensure_indexes as ensure_promise_indexes
         from app.webhooks import ensure_indexes as ensure_verification_indexes
+        from app.gateways.paypal.charge_attempts import ensure_indexes as ensure_charge_indexes
+        from app.gateways.paypal.vault import ensure_indexes as ensure_vault_indexes
+        from app.orchestrator.runs import ensure_orchestrator_indexes
 
         await connect_to_mongo()
         try:
@@ -59,6 +62,9 @@ async def reset_regress_db() -> int:
             await ensure_execution_indexes()
             await ensure_promise_indexes()
             await ensure_verification_indexes()
+            await ensure_charge_indexes()
+            await ensure_vault_indexes()
+            await ensure_orchestrator_indexes()
             print("Successfully initialized indexes on vasooli_regress.")
         finally:
             await close_mongo_connection()

@@ -30,7 +30,7 @@ from pymongo.errors import DuplicateKeyError
 
 from app.db import get_database
 from app.models.decision import MONEY_PRECISION
-from app.models.events import statuses_that_may_become
+from app.models.events import RevenueEvent, statuses_that_may_become
 from app.models.verification import (
     GATEWAY_VERIFIED,
     MERCHANT_ASSERTED,
@@ -60,6 +60,7 @@ class PayPalReconcileResult(BaseModel):
     amount_recovered: float | None = None
     assertion: str | None = None
     event_status: str | None = None
+    revenue_event_id: str | None = None
 
 
 def _utc_now() -> datetime:
@@ -189,7 +190,265 @@ async def reconcile_paypal_event(
     # Always use event create_time, never payment_date_time
     verified_at = _parse_timestamp(create_time)
 
-    # 2. Case: PAYMENT.CAPTURE.COMPLETED
+    # 2. Case: PAYMENT.CAPTURE.DECLINED (Step 2)
+    if event_type == "PAYMENT.CAPTURE.DECLINED":
+        custom_id = resource.get("custom_id")
+        if custom_id and custom_id.startswith("ev:"):
+            orig_event_id = custom_id[3:]
+            order_id = (
+                resource.get("supplementary_data", {}).get("related_ids", {}).get("order_id")
+                or resource.get("order_id")
+            )
+            exec_query: dict[str, Any] = {"gateway": "paypal"}
+            if order_id:
+                exec_query["gateway_ref"] = order_id
+            if orig_event_id:
+                exec_query["event_id"] = orig_event_id
+
+            execution = await db.executions.find_one(exec_query)
+            if not execution and orig_event_id:
+                execution = await db.executions.find_one({"event_id": orig_event_id, "gateway": "paypal"})
+
+            if execution:
+                await db.executions.update_one(
+                    {"_id": execution["_id"]},
+                    {"$set": {"successful": False, "success": False, "recovery_outcome": "not_recovered"}},
+                )
+
+                amount_expected = await _resolve_expected_amount(execution, db)
+                record = WebhookVerification(
+                    event_id=execution["event_id"],
+                    execution_id=str(execution["_id"]),
+                    gateway="paypal",
+                    gateway_ref=order_id or execution.get("gateway_ref"),
+                    assertion=GATEWAY_VERIFIED,
+                    outcome="not_recovered",
+                    paypal_event_id=paypal_event_id,
+                    paypal_event="PAYMENT.CAPTURE.DECLINED",
+                    amount_recovered=0.0,
+                    amount_expected=amount_expected,
+                    amount_mismatch=False,
+                    verified_at=verified_at,
+                )
+                from app.webhooks.store import insert as insert_verification
+                verif_id = await insert_verification(record)
+                return PayPalReconcileResult(
+                    processed=True,
+                    matched=True,
+                    duplicate=False,
+                    detail=f"Loop guard: recovery capture declined for event {orig_event_id}, recorded verification {verif_id}",
+                    paypal_event_id=paypal_event_id,
+                    event_type=event_type,
+                    verification_id=verif_id,
+                    outcome="not_recovered",
+                    amount_recovered=0.0,
+                    assertion=GATEWAY_VERIFIED,
+                    event_status=await _get_event_status(orig_event_id, db),
+                )
+            else:
+                logger.warning(
+                    "Loop guard: recovery capture declined with custom_id %s but no execution found",
+                    custom_id,
+                )
+                return PayPalReconcileResult(
+                    processed=False,
+                    matched=False,
+                    duplicate=False,
+                    detail=f"Unmatched recovery capture decline: custom_id={custom_id}, order_id={order_id}",
+                    paypal_event_id=paypal_event_id,
+                    event_type=event_type,
+                )
+
+        capture_id = resource.get("id")
+        if not capture_id:
+            return PayPalReconcileResult(
+                processed=False,
+                matched=False,
+                detail="Missing capture id in resource",
+                paypal_event_id=paypal_event_id,
+                event_type=event_type,
+            )
+        event_id = f"pp_{capture_id}"
+
+        # Idempotency check: has this event already been ingested?
+        existing_event = await db.events.find_one({"event_id": event_id})
+        if existing_event:
+            return PayPalReconcileResult(
+                processed=True,
+                matched=True,
+                duplicate=True,
+                detail=f"PayPal decline {event_id} already ingested",
+                paypal_event_id=paypal_event_id,
+                event_type=event_type,
+                event_status=str(existing_event.get("status")),
+            )
+
+        order_id = (
+            resource.get("supplementary_data", {}).get("related_ids", {}).get("order_id")
+            or resource.get("order_id")
+        )
+        amount_val = resource.get("amount", {}).get("value", "0.0")
+        amount = float(amount_val)
+        currency = resource.get("amount", {}).get("currency_code", "USD")
+        proc_resp = resource.get("processor_response", {})
+        response_code = proc_resp.get("response_code")
+        payment_advice_code = proc_resp.get("payment_advice_code") or resource.get("payment_advice_code")
+
+        gateway_detail: dict[str, Any] = {"processor_response": proc_resp}
+        if payment_advice_code:
+            gateway_detail["payment_advice_code"] = payment_advice_code
+
+        raw_failure_reason = f"paypal_{response_code}" if response_code else "paypal_declined"
+
+        # Resolve customer_ref: from custom_id "cust:" if present in payload, else charge_attempts
+        custom_id = resource.get("custom_id")
+        customer_ref = None
+        if custom_id and custom_id.startswith("cust:"):
+            customer_ref = custom_id[5:]
+
+        if not customer_ref and order_id:
+            attempt = await db.charge_attempts.find_one({"order_id": order_id})
+            if attempt and attempt.get("customer_ref"):
+                customer_ref = attempt["customer_ref"]
+
+        if not customer_ref:
+            # Cannot be resolved yet: store in paypal_events as unmatched, return 200
+            await db.paypal_events.update_one(
+                {"paypal_event_id": paypal_event_id},
+                {"$set": {
+                    "paypal_event_id": paypal_event_id,
+                    "event_type": event_type,
+                    "payload": event_data,
+                    "unmatched": True,
+                    "unmatched_reason": "customer_ref_unresolved",
+                    "order_id": order_id,
+                    "received_at": verified_at,
+                }},
+                upsert=True,
+            )
+            return PayPalReconcileResult(
+                processed=False,
+                matched=False,
+                duplicate=False,
+                detail=f"Unmatched decline: customer_ref unresolved for order {order_id}",
+                paypal_event_id=paypal_event_id,
+                event_type=event_type,
+            )
+
+        rev_event = RevenueEvent(
+            event_id=event_id,
+            surface="payment",
+            gateway="paypal",
+            gateway_ref=order_id,
+            amount=amount,
+            currency=currency,
+            customer_ref=customer_ref,
+            raw_failure_reason=raw_failure_reason,
+            gateway_detail=gateway_detail,
+            status="at_risk",
+            created_at=verified_at,
+        )
+
+        payload = rev_event.model_dump()
+        insert_only = {"created_at": payload.pop("created_at"), "status": payload.pop("status")}
+        await db.events.update_one(
+            {"event_id": event_id},
+            {"$set": payload, "$setOnInsert": insert_only},
+            upsert=True,
+        )
+
+        # Mark matched in paypal_events if present
+        await db.paypal_events.update_one(
+            {"paypal_event_id": paypal_event_id},
+            {"$set": {"unmatched": False, "matched_event_id": event_id}},
+        )
+
+        return PayPalReconcileResult(
+            processed=True,
+            matched=True,
+            duplicate=False,
+            detail="Ingested PAYMENT.CAPTURE.DECLINED as RevenueEvent",
+            paypal_event_id=paypal_event_id,
+            event_type=event_type,
+            event_status="at_risk",
+            revenue_event_id=event_id,
+        )
+
+    # 3. Case: VAULT.PAYMENT-TOKEN.CREATED (Step 4)
+    if event_type == "VAULT.PAYMENT-TOKEN.CREATED":
+        vault_id = resource.get("id")
+        if not vault_id:
+            return PayPalReconcileResult(
+                processed=False,
+                matched=False,
+                detail="Missing vault token id in resource",
+                paypal_event_id=paypal_event_id,
+                event_type=event_type,
+            )
+
+        # Idempotency check on vault_id
+        if hasattr(db, "customer_vault"):
+            existing_vault = await db.customer_vault.find_one({"vault_id": vault_id})
+            if existing_vault:
+                return PayPalReconcileResult(
+                    processed=True,
+                    matched=True,
+                    duplicate=True,
+                    detail=f"Vault token {vault_id} already recorded",
+                    paypal_event_id=paypal_event_id,
+                    event_type=event_type,
+                )
+
+        card_info = resource.get("payment_source", {}).get("card", {})
+        card_brand = card_info.get("brand", "UNKNOWN")
+        last_digits = card_info.get("last_digits", "")
+
+        # Resolve customer_ref: prefer charge_attempts from metadata.order_id, else custom_id
+        customer_ref = None
+        order_id = resource.get("metadata", {}).get("order_id")
+        if order_id and hasattr(db, "charge_attempts"):
+            attempt = await db.charge_attempts.find_one({"order_id": order_id})
+            if attempt and attempt.get("customer_ref"):
+                customer_ref = attempt["customer_ref"]
+
+        if not customer_ref:
+            custom_id = resource.get("custom_id")
+            if custom_id and custom_id.startswith("cust:"):
+                customer_ref = custom_id[5:]
+
+        if not customer_ref:
+            logger.info("Unmatched vault token %s (no customer_ref resolved)", vault_id)
+            return PayPalReconcileResult(
+                processed=False,
+                matched=False,
+                duplicate=False,
+                detail=f"Unmatched vault token: customer_ref unresolved for order {order_id}",
+                paypal_event_id=paypal_event_id,
+                event_type=event_type,
+            )
+
+        from app.gateways.paypal.vault import store_vault_token
+        doc, inserted = await store_vault_token(
+            customer_ref=customer_ref,
+            vault_id=vault_id,
+            card_brand=card_brand,
+            last_digits=last_digits,
+            source_event_id=paypal_event_id,
+            status="active",
+            created_at=verified_at,
+            db=db,
+        )
+
+        return PayPalReconcileResult(
+            processed=True,
+            matched=True,
+            duplicate=not inserted,
+            detail="Stored active vault payment token",
+            paypal_event_id=paypal_event_id,
+            event_type=event_type,
+        )
+
+    # 4. Case: PAYMENT.CAPTURE.COMPLETED
     if event_type == "PAYMENT.CAPTURE.COMPLETED":
         order_id = (
             resource.get("supplementary_data", {}).get("related_ids", {}).get("order_id")
@@ -426,6 +685,7 @@ async def reconcile_paypal_event(
                 )
 
             # Leave the event open — do NOT transition to recovered
+            # Step 5: A recovered event never regresses to open. A partial event arriving after the full one is stored but changes nothing.
             current_st = await _get_event_status(execution["event_id"], db)
             logger.info(
                 "Recorded verified partial payment %s for event %s (amount=%.2f, event remains %s)",
@@ -434,11 +694,16 @@ async def reconcile_paypal_event(
                 amount_recovered,
                 current_st,
             )
+            detail_msg = (
+                "Recorded verified partial amount with amount_mismatch=True; event already recovered"
+                if current_st == "recovered"
+                else "Recorded verified partial amount with amount_mismatch=True; event left open"
+            )
             return PayPalReconcileResult(
                 processed=True,
                 matched=True,
                 duplicate=False,
-                detail="Recorded verified partial amount with amount_mismatch=True; event left open",
+                detail=detail_msg,
                 paypal_event_id=paypal_event_id,
                 event_type=event_type,
                 verification_id=vid,
@@ -466,3 +731,23 @@ async def reconcile_paypal_event(
         paypal_event_id=paypal_event_id,
         event_type=event_type,
     )
+
+
+async def reprocess_unmatched_declines(db: Any = None) -> list[PayPalReconcileResult]:
+    """Reprocess any previously unmatched decline events from paypal_events.
+
+    Retries reconciliation when charge_attempts may have been recorded
+    after the webhook arrived.
+    """
+    if db is None:
+        db = get_database()
+    cursor = db.paypal_events.find({
+        "event_type": "PAYMENT.CAPTURE.DECLINED",
+        "unmatched": True,
+    })
+    results: list[PayPalReconcileResult] = []
+    async for doc in cursor:
+        res = await reconcile_paypal_event(doc.get("payload", {}), db=db)
+        results.append(res)
+    return results
+

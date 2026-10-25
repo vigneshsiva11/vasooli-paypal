@@ -32,14 +32,35 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from app.config import get_settings
+from app.diagnosis.rules import classify
+from app.gateways.paypal.charge_attempts import (
+    ensure_indexes as ensure_charge_indexes,
+    record_charge_attempt,
+)
+from app.gateways.paypal.vault import (
+    ensure_indexes as ensure_vault_indexes,
+    get_active_vault_token,
+)
 from app.metrics.aggregate import summarize
 from app.metrics.reader import (
     distinct_recoveries,
     load_snapshot,
     recovered_amount_per_event,
 )
+from app.models import RevenueEvent
+from app.models.diagnosis import PaymentRootCause
 from app.webhooks import ensure_indexes as ensure_webhook_indexes
-from app.webhooks.paypal_reconciler import reconcile_paypal_event
+from app.webhooks.paypal_reconciler import (
+    reconcile_paypal_event,
+    reprocess_unmatched_declines,
+)
+from unittest.mock import AsyncMock, patch
+from app.clock import SimulatedClock, MongoClock, advance_mongo_clock, get_clock
+from app.orchestrator.service import advance
+from app.orchestrator.runs import ensure_orchestrator_indexes
+from app.execution.port import ExecutionResult
+import app.execution.service
+import app.db
 
 FIXTURES_DIR = PROJECT_ROOT / "tests" / "fixtures" / "paypal"
 
@@ -69,30 +90,52 @@ async def run_integration_check() -> int:
         # Load fixtures
         partial_path = FIXTURES_DIR / "invoicing_invoice_paid_partial.json"
         full_path = FIXTURES_DIR / "invoicing_invoice_paid_full.json"
+        declined_path = FIXTURES_DIR / "payment_capture_declined.json"
+        vault_path = FIXTURES_DIR / "vault_payment_token_created.json"
+
         assert partial_path.exists(), f"Missing fixture: {partial_path}"
         assert full_path.exists(), f"Missing fixture: {full_path}"
+        assert declined_path.exists(), f"Missing fixture: {declined_path}"
+        assert vault_path.exists(), f"Missing fixture: {vault_path}"
 
         partial_fixture = json.loads(partial_path.read_text(encoding="utf-8"))
         full_fixture = json.loads(full_path.read_text(encoding="utf-8"))
+        declined_fixture = json.loads(declined_path.read_text(encoding="utf-8"))
+        vault_fixture = json.loads(vault_path.read_text(encoding="utf-8"))
 
         partial_event_id = partial_fixture["id"]
         full_event_id = full_fixture["id"]
+        declined_event_id = declined_fixture["id"]
+        vault_event_id = vault_fixture["id"]
         invoice_id = "INV2-LSEJ-2LLG-D59L-2QNU"
 
-        print(f"Loaded fixtures: partial={partial_event_id}, full={full_event_id}")
+        print(
+            f"Loaded fixtures: partial={partial_event_id}, full={full_event_id}, "
+            f"declined={declined_event_id}, vault={vault_event_id}"
+        )
 
         # Ensure collection indexes on vasooli_regress
         from app.db import connect_to_mongo, close_mongo_connection
         await connect_to_mongo()
         try:
             await ensure_webhook_indexes()
+            await ensure_charge_indexes()
+            await ensure_vault_indexes()
         finally:
             await close_mongo_connection()
 
         event_id = "evt_paypal_reconciler_integration_01"
+        decline_capture_id = declined_fixture["resource"]["id"]
+        decline_event_id = f"pp_{decline_capture_id}"
+        decline_order_id = declined_fixture["resource"]["supplementary_data"]["related_ids"]["order_id"]
+        decline_cust_ref = "cust_paypal_decline_integ"
 
-        # Clean up any prior test data for this event / fixture
-        await db.events.delete_many({"event_id": event_id})
+        vault_token_id = vault_fixture["resource"]["id"]
+        vault_order_id = vault_fixture["resource"]["metadata"]["order_id"]
+        vault_cust_ref = "cust_vault_integ_01"
+
+        # Clean up any prior test data for this test run
+        await db.events.delete_many({"event_id": {"$in": [event_id, decline_event_id]}})
         await db.executions.delete_many({"event_id": event_id})
         await db.verifications.delete_many({
             "$or": [
@@ -101,8 +144,10 @@ async def run_integration_check() -> int:
             ]
         })
         await db.paypal_events.delete_many({
-            "paypal_event_id": {"$in": [partial_event_id, full_event_id]}
+            "paypal_event_id": {"$in": [partial_event_id, full_event_id, declined_event_id, vault_event_id]}
         })
+        await db.charge_attempts.delete_many({"order_id": {"$in": [decline_order_id, vault_order_id]}})
+        await db.customer_vault.delete_many({"vault_id": vault_token_id})
 
         # 1. Seed event and execution
         event_doc = {
@@ -110,7 +155,10 @@ async def run_integration_check() -> int:
             "amount": 100.00,
             "currency": "USD",
             "status": "at_risk",
-            "customer_id": "cust_paypal_integration_01",
+            "surface": "payment",
+            "customer_ref": "cust_paypal_integration_01",
+            "raw_failure_reason": "invoice_unpaid",
+            "gateway": "paypal",
             "created_at": datetime.now(timezone.utc),
         }
         await db.events.insert_one(event_doc)
@@ -223,8 +271,400 @@ async def run_integration_check() -> int:
         finally:
             await close_mongo_connection()
 
+        # 8. PAYMENT.CAPTURE.DECLINED when unmatched
+        r_dec_unmatched = await reconcile_paypal_event(declined_fixture, db)
+        assert r_dec_unmatched.processed is False, "Decline fixture should have processed=False when unmatched"
+        assert r_dec_unmatched.matched is False, "Decline fixture without attempt should not be matched"
+        stored_unmatched = await db.paypal_events.find_one({"paypal_event_id": declined_event_id})
+        assert stored_unmatched is not None, "Unmatched decline must be saved to paypal_events"
+        assert stored_unmatched.get("unmatched") is True, "paypal_events doc must have unmatched=True"
+        assert await db.events.find_one({"event_id": decline_event_id}) is None, (
+            "No event should be created while decline is unmatched"
+        )
+        print("  [PASS] PAYMENT.CAPTURE.DECLINED unmatched: stored in paypal_events with unmatched=True")
+
+        # 9. Seed charge attempt and reprocess unmatched declines
+        await record_charge_attempt(
+            order_id=decline_order_id,
+            customer_ref=decline_cust_ref,
+            amount=10.00,
+            currency="USD",
+            purpose="renewal",
+            db=db,
+        )
+        reprocessed = await reprocess_unmatched_declines(db)
+        assert len(reprocessed) >= 1, f"Expected at least 1 decline reprocessed, got {len(reprocessed)}"
+
+        dec_event = await db.events.find_one({"event_id": decline_event_id})
+        assert dec_event is not None, f"Event {decline_event_id} was not created after reprocessing"
+        assert dec_event["status"] == "at_risk"
+        assert dec_event["amount"] == 10.00
+        assert dec_event["currency"] == "USD"
+        assert dec_event["customer_ref"] == decline_cust_ref
+        assert dec_event["raw_failure_reason"] == "paypal_5120"
+        assert dec_event["gateway"] == "paypal"
+        assert dec_event["surface"] == "payment"
+        assert dec_event.get("gateway_detail", {}).get("processor_response", {}).get("response_code") == "5120"
+
+        # Verify rule-based diagnosis maps paypal_5120 to insufficient_funds
+        rev_ev_5120 = RevenueEvent(**{k: v for k, v in dec_event.items() if k != "_id"})
+        m_5120 = classify(rev_ev_5120)
+        assert m_5120 is not None and m_5120.root_cause == "insufficient_funds", f"Expected insufficient_funds, got {m_5120}"
+
+        rev_ev_0500 = RevenueEvent(event_id="pp_0500", surface="payment", amount=10.0, customer_ref="c", raw_failure_reason="paypal_0500")
+        m_0500 = classify(rev_ev_0500)
+        assert m_0500 is not None and m_0500.root_cause == "issuer_declined"
+
+        rev_ev_00N7 = RevenueEvent(event_id="pp_00N7", surface="payment", amount=10.0, customer_ref="c", raw_failure_reason="paypal_00N7")
+        m_00N7 = classify(rev_ev_00N7)
+        assert m_00N7 is not None and m_00N7.root_cause == "card_verification_failed"
+
+        rev_ev_9999 = RevenueEvent(event_id="pp_9999", surface="payment", amount=10.0, customer_ref="c", raw_failure_reason="paypal_9999")
+        m_9999 = classify(rev_ev_9999)
+        assert m_9999 is None
+
+        # Replay decline fixture (idempotent)
+        r_dec_replay = await reconcile_paypal_event(declined_fixture, db)
+        assert r_dec_replay.duplicate is True, "Replaying declined fixture should return duplicate=True"
+        print("  [PASS] Reprocessed decline: created RevenueEvent with paypal_5120, diagnosed INSUFFICIENT_FUNDS, replay idempotent")
+
+        # 10. VAULT.PAYMENT-TOKEN.CREATED reconciliation
+        await record_charge_attempt(
+            order_id=vault_order_id,
+            customer_ref=vault_cust_ref,
+            amount=0.00,
+            currency="USD",
+            purpose="onboarding",
+            db=db,
+        )
+        r_vault = await reconcile_paypal_event(vault_fixture, db)
+        assert r_vault.processed is True, "Vault fixture was not processed"
+        assert r_vault.matched is True, "Vault fixture was not matched"
+        assert r_vault.duplicate is False, "Vault fixture marked duplicate unexpectedly"
+
+        vault_token = await get_active_vault_token(vault_cust_ref, db=db)
+        assert vault_token is not None, f"No active vault token found for {vault_cust_ref}"
+        assert vault_token["vault_id"] == vault_token_id
+        assert vault_token["card_brand"] == "VISA"
+        assert vault_token["last_digits"] == "1111"
+        assert vault_token["status"] == "active"
+
+        # Replay vault fixture
+        r_vault_replay = await reconcile_paypal_event(vault_fixture, db)
+        assert r_vault_replay.duplicate is True, "Replaying vault fixture should return duplicate=True"
+
+        # Unique index on customer_vault
+        dup_vault_raised = False
+        try:
+            await db.customer_vault.insert_one({
+                "customer_ref": "cust_other",
+                "vault_id": vault_token_id,
+                "card_brand": "VISA",
+                "last_digits": "1111",
+                "status": "active",
+                "source_event_id": "other_event",
+                "created_at": datetime.now(timezone.utc),
+            })
+        except DuplicateKeyError:
+            dup_vault_raised = True
+        assert dup_vault_raised, "Duplicate vault_id did not raise DuplicateKeyError"
+        # 11. STEP 5b: ORCHESTRATOR ADVANCE & RUNS (REAL MONGODB)
+        await ensure_orchestrator_indexes(db)
+        app.db._database = db
+
+        # Cleanup any prior run docs
+        await db.events.delete_many({"event_id": {"$in": ["pp_orch_11", "pp_orch_no_vault"]}})
+        await db.customer_vault.delete_many({"customer_ref": {"$in": ["cust_orch_11", "cust_no_vault_14"]}})
+        await db.orchestrator_runs.delete_many({"event_id": {"$in": ["pp_orch_11", "pp_orch_no_vault"]}})
+        await db.executions.delete_many({"event_id": {"$in": ["pp_orch_11", "pp_orch_no_vault"]}})
+        await db.decisions.delete_many({"event_id": {"$in": ["pp_orch_11", "pp_orch_no_vault"]}})
+        await db.policy_verdicts.delete_many({"event_id": {"$in": ["pp_orch_11", "pp_orch_no_vault"]}})
+        await db.diagnoses.delete_many({"event_id": {"$in": ["pp_orch_11", "pp_orch_no_vault"]}})
+        await db.paypal_events.delete_many({"paypal_event_id": "WH-DECL-LOOP-11"})
+        await db.verifications.delete_many({"paypal_event_id": "WH-DECL-LOOP-11"})
+
+        sim_clock_11 = SimulatedClock()
+        await db.events.insert_one({
+            "event_id": "pp_orch_11",
+            "surface": "payment",
+            "gateway": "paypal",
+            "amount": 65.0,
+            "currency": "USD",
+            "customer_ref": "cust_orch_11",
+            "status": "at_risk",
+            "raw_failure_reason": "paypal_5120",
+            "gateway_detail": {"processor_response": {"response_code": "5120"}},
+            "created_at": sim_clock_11.now(),
+        })
+        await db.customer_vault.insert_one({
+            "vault_id": "vlt_orch_11",
+            "customer_ref": "cust_orch_11",
+            "card_brand": "VISA",
+            "last_digits": "4444",
+            "status": "active",
+            "source_event_id": "pp_seed",
+            "created_at": sim_clock_11.now(),
+        })
+
+        mock_order_res = {
+            "id": "ORD-ORCH-RET-11",
+            "status": "COMPLETED",
+            "links": [{"rel": "self", "href": "https://api.sandbox.paypal.com/v2/checkout/orders/ORD-ORCH-RET-11"}],
+        }
+
+        with patch("app.gateways.paypal.orders.create_vaulted_order", AsyncMock(return_value=mock_order_res)):
+            res_adv_11 = await advance("pp_orch_11", clock=sim_clock_11, db=db)
+            assert res_adv_11.get("status") == "completed", f"Advance status unexpected: {res_adv_11}"
+            assert res_adv_11.get("stage") == "execute"
+
+            # Check orchestrator runs
+            runs = await db.orchestrator_runs.find({"event_id": "pp_orch_11"}).to_list(10)
+            assert len(runs) == 4, f"Expected 4 runs (diagnose, decide, policy, execute), got {len(runs)}"
+            assert all(r.get("simulated_time") is True for r in runs), "Runs must be marked simulated_time=True"
+
+            # Check execution
+            exec_doc = await db.executions.find_one({"event_id": "pp_orch_11"})
+            assert exec_doc is not None, "Execution document was not created"
+            assert exec_doc.get("gateway_ref") == "ORD-ORCH-RET-11"
+            assert exec_doc.get("simulated_time") is True
+
+            # Replay advance is idempotent
+            res_replay = await advance("pp_orch_11", clock=sim_clock_11, db=db)
+            assert res_replay.get("status") in ("terminal", "already_executed")
+            runs_replay = await db.orchestrator_runs.find({"event_id": "pp_orch_11"}).to_list(10)
+            assert len(runs_replay) == 4, "Replay must create zero duplicate runs"
+
+            # Unique index on orchestrator_runs: duplicate event_id+stage+record_version raises DuplicateKeyError
+            dup_run_raised = False
+            try:
+                await db.orchestrator_runs.insert_one({
+                    "event_id": "pp_orch_11",
+                    "stage": "diagnose",
+                    "record_version": 1,
+                    "outcome": "diagnosed",
+                    "real_time": datetime.now(timezone.utc),
+                    "clock_now": sim_clock_11.now(),
+                    "simulated_time": True,
+                })
+            except DuplicateKeyError:
+                dup_run_raised = True
+            assert dup_run_raised, "Duplicate orchestrator_runs did not raise DuplicateKeyError"
+
+        print("  [PASS] Orchestrator advance: runs 4 stages, simulated_time marked, runs unique index enforced, replay idempotent")
+
+        # 12. SIMULATED CLOCK (DB-PERSISTED)
+        adv_clock = await advance_mongo_clock(hours=5.0, db=db)
+        assert adv_clock.offset_seconds >= 5.0 * 3600.0
+        db_clock = await get_clock(db=db)
+        assert isinstance(db_clock, MongoClock), f"Expected MongoClock, got {type(db_clock)}"
+        assert db_clock.is_simulated() is True
+        print("  [PASS] Simulated Clock: advance_mongo_clock updates DB offset, get_clock returns MongoClock in simulated time")
+
+        # 13. LOOP GUARD (REAL MONGODB)
+        webhook_declined_loop = {
+            "id": "WH-DECL-LOOP-11",
+            "event_type": "PAYMENT.CAPTURE.DECLINED",
+            "resource": {
+                "id": "CAP-LOOP-11",
+                "custom_id": "ev:pp_orch_11",
+                "order_id": "ORD-ORCH-RET-11",
+                "amount": {"value": "65.00", "currency_code": "USD"},
+            },
+        }
+
+        events_before_count = await db.events.count_documents({})
+        r_loop = await reconcile_paypal_event(webhook_declined_loop, db)
+        assert r_loop.processed is True
+        assert r_loop.outcome == "not_recovered"
+
+        events_after_count = await db.events.count_documents({})
+        assert events_after_count == events_before_count, "Loop guard must NEVER create a new RevenueEvent"
+
+        exec_after_loop = await db.executions.find_one({"event_id": "pp_orch_11"})
+        assert exec_after_loop.get("successful") is False
+        assert exec_after_loop.get("recovery_outcome") == "not_recovered"
+
+        # Replay loop webhook (idempotent)
+        r_loop_dup = await reconcile_paypal_event(webhook_declined_loop, db)
+        assert r_loop_dup.duplicate is True
+        print("  [PASS] Loop guard: declined recovery capture ('ev:') attaches not_recovered, creates no new event, replay idempotent")
+
+        # 14. RETRY EXCLUSION & FALLBACK (NO VAULT TOKEN)
+        await db.events.insert_one({
+            "event_id": "pp_orch_no_vault",
+            "surface": "payment",
+            "gateway": "paypal",
+            "amount": 50.0,
+            "currency": "USD",
+            "customer_ref": "cust_no_vault_14",
+            "status": "at_risk",
+            "raw_failure_reason": "paypal_5120",
+            "gateway_detail": {"processor_response": {"response_code": "5120"}},
+            "created_at": sim_clock_11.now(),
+        })
+
+        mock_link_res = ExecutionResult(
+            status="completed",
+            gateway="paypal",
+            gateway_ref="INV-ORCH-14",
+            gateway_url="https://www.sandbox.paypal.com/invoice/p/#INV-ORCH-14",
+        )
+
+        with patch.object(app.execution.service.PayPalExecutionAdapter, "execute_link", AsyncMock(return_value=mock_link_res)):
+            res_adv_14 = await advance("pp_orch_no_vault", clock=sim_clock_11, db=db)
+            assert res_adv_14.get("status") == "completed"
+
+            dec_14 = await db.decisions.find_one({"event_id": "pp_orch_no_vault"})
+            assert dec_14 is not None
+            assert dec_14.get("excluded_interventions") == ["immediate_retry", "delayed_retry"]
+            assert dec_14.get("exclusion_reason") == "no_active_vault_token"
+            assert dec_14.get("recommended_intervention") == "payment_method_update_link"
+
+            exec_14 = await db.executions.find_one({"event_id": "pp_orch_no_vault"})
+            assert exec_14 is not None
+            assert exec_14.get("intervention") == "payment_method_update_link"
+            assert exec_14.get("gateway_ref") == "INV-ORCH-14"
+
+        print("  [PASS] Retry exclusion: missing vault token excludes retries, falls back to payment_method_update_link")
+
+        # 15. USD RETRY CAP INTEGRATION CHECK (REAL MONGODB)
+        # Verify real MongoDB reads of prior_retry_executions, max 3 cap, and 24h cooldown.
+        from datetime import timedelta
+        from app.policy.engine import evaluate
+        from app.policy.rules import current_rulebook
+        from app.policy.store import gather_context
+        from app.models.decision import DecisionRecord
+
+        usd_event_id = "ev_usd_retry_cap_integ"
+        now_sim = sim_clock_11.now()
+
+        # Insert USD event with vault token
+        await db.events.delete_many({"event_id": usd_event_id})
+        await db.executions.delete_many({"event_id": usd_event_id})
+        await db.events.insert_one({
+            "event_id": usd_event_id,
+            "surface": "payment",
+            "gateway": "paypal",
+            "amount": 100.0,
+            "currency": "USD",
+            "customer_ref": "cust_usd_cap_integ",
+            "status": "at_risk",
+            "created_at": now_sim,
+        })
+        await db.customer_vault.update_one(
+            {"customer_ref": "cust_usd_cap_integ"},
+            {
+                "$set": {
+                    "customer_ref": "cust_usd_cap_integ",
+                    "vault_token_id": "tok_usd_cap_integ",
+                    "status": "active",
+                    "created_at": now_sim,
+                    "updated_at": now_sim,
+                }
+            },
+            upsert=True,
+        )
+
+        dec_record = DecisionRecord(
+            id=str(ObjectId()),
+            version=1,
+            event_id=usd_event_id,
+            diagnosis_id=str(ObjectId()),
+            diagnosis_version=1,
+            recommended_intervention="delayed_retry",
+            revenue_at_risk=100.0,
+            recovery_probability=0.7,
+            estimated_cost=0.0,
+            expected_recovery_value=70.0,
+            reasoning="USD retry cap integration check",
+            decided_at=now_sim,
+        )
+
+        usd_rulebook = current_rulebook("USD")
+
+        # Case A: 3 completed retries in real MongoDB -> blocked / retry_cap_exceeded
+        for i in range(3):
+            await db.executions.insert_one({
+                "execution_id": f"exec_cap_{i}",
+                "event_id": usd_event_id,
+                "policy_verdict_id": str(ObjectId()),
+                "intervention": "delayed_retry",
+                "status": "completed",
+                "executed_at": now_sim - timedelta(hours=30 + i * 25),
+                "created_at": now_sim - timedelta(hours=30 + i * 25),
+            })
+
+        ctx_a = await gather_context(decision=dec_record, customer_ref="cust_usd_cap_integ", now=now_sim, rulebook=usd_rulebook)
+        assert ctx_a.prior_retry_executions == 3, f"Expected 3 prior retries from Mongo, got {ctx_a.prior_retry_executions}"
+        v_a = evaluate(decision=dec_record, context=ctx_a, rulebook=usd_rulebook)
+        assert v_a.verdict == "blocked"
+        assert v_a.reason == "retry_cap_exceeded"
+        assert "retry cap reached: 3 prior retry executions" in v_a.checks_performed[0]
+
+        # Case B: 2 retries, last was only 12h ago (less than 24h gap) -> blocked / retry_cap_exceeded
+        await db.executions.delete_many({"event_id": usd_event_id})
+        for i in range(2):
+            await db.executions.insert_one({
+                "execution_id": f"exec_cooldown_{i}",
+                "event_id": usd_event_id,
+                "policy_verdict_id": str(ObjectId()),
+                "intervention": "delayed_retry",
+                "status": "completed",
+                "executed_at": now_sim - timedelta(hours=12 if i == 0 else 40),
+                "created_at": now_sim - timedelta(hours=12 if i == 0 else 40),
+            })
+
+        ctx_b = await gather_context(decision=dec_record, customer_ref="cust_usd_cap_integ", now=now_sim, rulebook=usd_rulebook)
+        assert ctx_b.prior_retry_executions == 2
+        v_b = evaluate(decision=dec_record, context=ctx_b, rulebook=usd_rulebook)
+        assert v_b.verdict == "blocked"
+        assert v_b.reason == "retry_cap_exceeded"
+        assert "retry cooldown active" in v_b.checks_performed[0]
+
+        # Case C: 2 retries, last was 25h ago (clears 24h gap and cap < 3) -> authorized / ok
+        await db.executions.delete_many({"event_id": usd_event_id})
+        for i in range(2):
+            await db.executions.insert_one({
+                "execution_id": f"exec_ok_{i}",
+                "event_id": usd_event_id,
+                "policy_verdict_id": str(ObjectId()),
+                "intervention": "delayed_retry",
+                "status": "completed",
+                "executed_at": now_sim - timedelta(hours=25 if i == 0 else 60),
+                "created_at": now_sim - timedelta(hours=25 if i == 0 else 60),
+            })
+
+        ctx_c = await gather_context(decision=dec_record, customer_ref="cust_usd_cap_integ", now=now_sim, rulebook=usd_rulebook)
+        assert ctx_c.prior_retry_executions == 2
+        v_c = evaluate(decision=dec_record, context=ctx_c, rulebook=usd_rulebook)
+        assert v_c.verdict == "authorized"
+        assert v_c.reason == "ok"
+
+        # Case D: 3 retries where executions have status="declined" count toward retry cap
+        await db.executions.delete_many({"event_id": usd_event_id})
+        for i in range(3):
+            st = "declined" if i % 2 == 0 else "completed"
+            await db.executions.insert_one({
+                "execution_id": f"exec_declined_cap_{i}",
+                "event_id": usd_event_id,
+                "policy_verdict_id": str(ObjectId()),
+                "intervention": "delayed_retry",
+                "status": st,
+                "executed_at": now_sim - timedelta(hours=30 + i * 24),
+                "created_at": now_sim - timedelta(hours=30 + i * 24),
+            })
+
+        ctx_d = await gather_context(decision=dec_record, customer_ref="cust_usd_cap_integ", now=now_sim, rulebook=usd_rulebook)
+        assert ctx_d.prior_retry_executions == 3, f"Expected 3 prior retry executions including declined, got {ctx_d.prior_retry_executions}"
+        v_d = evaluate(decision=dec_record, context=ctx_d, rulebook=usd_rulebook)
+        assert v_d.verdict == "blocked"
+        assert v_d.reason == "retry_cap_exceeded"
+        assert "retry cap reached: 3 prior retry executions" in v_d.checks_performed[0]
+
+        print("  [PASS] USD Retry Cap integration check: 3 retries capped (including 'declined'), 24h cooldown enforced, real MongoDB queries verified")
+
         print("\n" + "=" * 78)
-        print("RESULT: ALL INTEGRATION CHECKS PASSED")
+        print("RESULT: ALL INTEGRATION CHECKS PASSED (16/16)")
         print("=" * 78)
         return 0
 

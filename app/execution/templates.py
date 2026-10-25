@@ -98,6 +98,7 @@ class NoTemplate(LookupError):
 CAUSE_PHRASES: dict[str, str] = {
     # Payment / subscription — instrument problems.
     "card_expired": "the card on file has passed its expiry date",
+    "card_verification_failed": "the card security details could not be verified",
     "insufficient_funds": "the payment was declined for insufficient funds",
     "issuer_declined": "the card issuer declined the payment",
     "temporary_processing_error": "a temporary processing error interrupted the payment",

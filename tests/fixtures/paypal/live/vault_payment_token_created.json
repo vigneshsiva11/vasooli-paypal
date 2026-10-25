@@ -1,0 +1,85 @@
+{
+  "create_time": "2026-10-25T05:55:59.064Z",
+  "event_type": "VAULT.PAYMENT-TOKEN.CREATED",
+  "event_version": "1.0",
+  "id": "WH-1GS16093L62323701-3L2850250W433933F",
+  "links": [
+    {
+      "href": "https://api.sandbox.paypal.com/v1/notifications/webhooks-events/WH-1GS16093L62323701-3L2850250W433933F",
+      "method": "GET",
+      "rel": "self"
+    },
+    {
+      "href": "https://api.sandbox.paypal.com/v1/notifications/webhooks-events/WH-1GS16093L62323701-3L2850250W433933F/resend",
+      "method": "POST",
+      "rel": "resend"
+    }
+  ],
+  "resource": {
+    "create_time": "2026-10-25T05:55:47.723Z",
+    "customer": {
+      "id": "bUPhnSIexi"
+    },
+    "id": "3w783067vb799012h",
+    "links": [
+      {
+        "encType": "application/json",
+        "href": "https://api.sandbox.paypal.com/v3/vault/payment-tokens/3w783067vb799012h",
+        "method": "GET",
+        "rel": "self"
+      },
+      {
+        "encType": "application/json",
+        "href": "https://api.sandbox.paypal.com/v3/vault/payment-tokens/3w783067vb799012h",
+        "method": "DELETE",
+        "rel": "delete"
+      }
+    ],
+    "metadata": {
+      "order_id": "8YF00147EB635281R"
+    },
+    "owner": {
+      "merchant_id": "FJD79RSJQC7BC"
+    },
+    "owner_id": "FJD79RSJQC7BC",
+    "payment_source": {
+      "card": {
+        "billing_address": {
+          "address_line_1": "2211 N First Street",
+          "admin_area_1": "CA",
+          "admin_area_2": "San Jose",
+          "country_code": "US",
+          "postal_code": "95131"
+        },
+        "brand": "VISA",
+        "expiry": "2028-12",
+        "last_digits": "1111",
+        "name": "Test Buyer",
+        "network_transaction_reference": {
+          "id": "942924423860825",
+          "network": "VISA",
+          "time": "2026-10-24T22:55:47Z"
+        },
+        "verification": {
+          "amount": {
+            "currency_code": "USD",
+            "value": "0.00"
+          },
+          "processor_response": {
+            "avs_code": "A",
+            "cvv_code": "M",
+            "response_code": "0000"
+          }
+        },
+        "verification_status": "VERIFIED"
+      }
+    },
+    "time_created": "2026-10-24T22:55:47.725PDT",
+    "update_time": "2026-10-25T05:55:47.723Z"
+  },
+  "resource_type": "payment_token",
+  "resource_version": "3.0",
+  "summary": "A payment token has been created.",
+  "source": "captured",
+  "original_payload_sha256": "08ebbf52a9adbf560c48f335f226467f6e548e8fe34e0ab0a0054415fd97ed96"
+}

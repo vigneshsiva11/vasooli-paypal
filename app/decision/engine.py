@@ -60,7 +60,11 @@ def _score(candidate: Candidate, revenue_at_risk: float, currency: str = "INR") 
 
 
 def evaluate(
-    surface: str, root_cause: str, revenue_at_risk: float, currency: str = "INR"
+    surface: str,
+    root_cause: str,
+    revenue_at_risk: float,
+    currency: str = "INR",
+    excluded_interventions: list[str] | set[str] | None = None,
 ) -> list[tuple[Candidate, float, float]]:
     """Score every permitted intervention for a diagnosis, best first.
 
@@ -70,9 +74,13 @@ def evaluate(
     Ties break toward the cheaper intervention, then alphabetically, so the same
     inputs always yield the same recommendation.
     """
+    excluded_set = set(excluded_interventions or [])
+    candidates = [c for c in candidates_for(surface, root_cause) if c.intervention not in excluded_set]
+    if not candidates:
+        candidates = [Candidate("no_action", 0.0, "All candidate interventions were excluded")]
     scored = [
         _score(candidate, revenue_at_risk, currency=currency)
-        for candidate in candidates_for(surface, root_cause)
+        for candidate in candidates
     ]
     scored.sort(key=lambda item: (-item[2], item[1], item[0].intervention))
     return scored
@@ -84,6 +92,8 @@ def _no_action_decision(
     revenue_at_risk: float,
     intervention: str,
     reasoning: str,
+    excluded_interventions: list[str] | None = None,
+    exclusion_reason: str | None = None,
 ) -> Decision:
     """Assemble a decision that attempts nothing.
 
@@ -100,10 +110,18 @@ def _no_action_decision(
         revenue_at_risk=revenue_at_risk,
         expected_recovery_value=expected_recovery_value(revenue_at_risk, 0.0, 0.0),
         reasoning=_truncate(reasoning),
+        excluded_interventions=excluded_interventions,
+        exclusion_reason=exclusion_reason,
     )
 
 
-def decide(*, diagnosis: DiagnosisRecord, event: RevenueEvent) -> Decision:
+def decide(
+    *,
+    diagnosis: DiagnosisRecord,
+    event: RevenueEvent,
+    excluded_interventions: list[str] | set[str] | None = None,
+    exclusion_reason: str | None = None,
+) -> Decision:
     """Recommend the best-scoring intervention for one diagnosis version.
 
     The gates apply in this order, and the order is load-bearing:
@@ -180,8 +198,20 @@ def decide(*, diagnosis: DiagnosisRecord, event: RevenueEvent) -> Decision:
             ),
         )
 
+    ex_list = list(excluded_interventions) if excluded_interventions else None
+    exclusion_note = ""
+    if ex_list:
+        reason_str = f" ({exclusion_reason})" if exclusion_reason else ""
+        exclusion_note = f" Excluded: {', '.join(sorted(ex_list))}{reason_str}."
+
     # 3. Score every permitted option for this exact root cause.
-    scored = evaluate(diagnosis.surface, diagnosis.root_cause, revenue_at_risk, currency=currency)
+    scored = evaluate(
+        diagnosis.surface,
+        diagnosis.root_cause,
+        revenue_at_risk,
+        currency=currency,
+        excluded_interventions=excluded_interventions,
+    )
     best_candidate, best_cost, best_erv = scored[0]
 
     # The matrix itself may map a cause to no-action — the ratified handling of
@@ -194,8 +224,10 @@ def decide(*, diagnosis: DiagnosisRecord, event: RevenueEvent) -> Decision:
             reasoning=(
                 f"{provenance} The intervention matrix maps "
                 f"{diagnosis.surface}/{diagnosis.root_cause} to no action. "
-                f"{best_candidate.assumption}"
+                f"{best_candidate.assumption}{exclusion_note}"
             ),
+            excluded_interventions=ex_list,
+            exclusion_reason=exclusion_reason,
         )
 
     comparison = "; ".join(
@@ -215,8 +247,10 @@ def decide(*, diagnosis: DiagnosisRecord, event: RevenueEvent) -> Decision:
                 f"{provenance} Every available option costs more than it is "
                 f"expected to recover on {_money(revenue_at_risk)} at risk. "
                 f"Scored: {comparison}. Best ERV {_money(best_erv)} is negative, so "
-                f"the economically correct action is to spend nothing.{currency_note}"
+                f"the economically correct action is to spend nothing.{currency_note}{exclusion_note}"
             ),
+            excluded_interventions=ex_list,
+            exclusion_reason=exclusion_reason,
         )
 
     alternatives = len(scored) - 1
@@ -244,6 +278,8 @@ def decide(*, diagnosis: DiagnosisRecord, event: RevenueEvent) -> Decision:
             f"{provenance} Scored: {comparison}. {choice} "
             f"Assumption behind {best_candidate.recovery_probability:.2f}: "
             f"{best_candidate.assumption} Probabilities are calibrated estimates, "
-            f"not measured rates.{currency_note}"
+            f"not measured rates.{currency_note}{exclusion_note}"
         ),
+        excluded_interventions=ex_list,
+        exclusion_reason=exclusion_reason,
     )

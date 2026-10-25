@@ -1,0 +1,65 @@
+{
+  "timestamp": "2026-10-25T06:04:52.019443+00:00",
+  "api_calls_made": 0,
+  "order_a": {
+    "http_status": 201,
+    "order_id": "8YF00147EB635281R",
+    "capture_id": "28C544276S4714412",
+    "order_status": "COMPLETED",
+    "capture_status": "COMPLETED",
+    "vault_id": "3w783067vb799012h"
+  },
+  "order_b": {
+    "create_http_status": 201,
+    "order_id": "2CG62440G8279605F",
+    "capture_id": "5LG46948JJ571544V",
+    "order_status": "COMPLETED",
+    "capture_status": "DECLINED",
+    "body_status": "COMPLETED",
+    "processor_response": {
+      "avs_code": "G",
+      "cvv_code": "P",
+      "response_code": "5120"
+    }
+  },
+  "order_b_raw_body": null,
+  "order_c": {
+    "http_status": 201,
+    "order_id": "29935697HU833963D",
+    "capture_id": "64P52986GA335712Y",
+    "order_status": "COMPLETED",
+    "capture_status": "COMPLETED"
+  },
+  "found_events_keys": [
+    "vault_payment_token_created",
+    "payment_capture_declined_order_b",
+    "payment_capture_completed_order_c",
+    "payment_capture_completed_order_a"
+  ],
+  "exported_fixtures": {
+    "vault_payment_token_created": {
+      "file": "tests\\fixtures\\paypal\\live\\vault_payment_token_created.json",
+      "sha256": "eda1ad02679667a2c69357d1b100529bfd89f23d0e12a4b1cca13e1181ecd8a5",
+      "event_type": "VAULT.PAYMENT-TOKEN.CREATED",
+      "paypal_event_id": "WH-1GS16093L62323701-3L2850250W433933F"
+    },
+    "payment_capture_declined_order_b": {
+      "file": "tests\\fixtures\\paypal\\live\\payment_capture_declined_order_b.json",
+      "sha256": "464c0c44dc216f792f05f2a84d792219c034f96267195e9ee005c079fb71d953",
+      "event_type": "PAYMENT.CAPTURE.DECLINED",
+      "paypal_event_id": "WH-4AF58932CR119514D-1KM26931PG851734B"
+    },
+    "payment_capture_completed_order_c": {
+      "file": "tests\\fixtures\\paypal\\live\\payment_capture_completed_order_c.json",
+      "sha256": "eae300e0d07e97a7f697c168776c4ea8cdad7f6e51fee5bb3d32c3a5d441d3d7",
+      "event_type": "PAYMENT.CAPTURE.COMPLETED",
+      "paypal_event_id": "WH-7LY56442MB8918050-91623769MG2801454"
+    },
+    "payment_capture_completed_order_a": {
+      "file": "tests\\fixtures\\paypal\\live\\payment_capture_completed_order_a.json",
+      "sha256": "3ce1b5b85caa68e1569eeeb23be8f3959bf7599087fe662f45aca863625b2c56",
+      "event_type": "PAYMENT.CAPTURE.COMPLETED",
+      "paypal_event_id": "WH-6BJ84679FR1049458-6RT28794KN431740B"
+    }
+  }
+}

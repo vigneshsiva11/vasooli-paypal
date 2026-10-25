@@ -110,7 +110,11 @@ async def create_and_capture_order(
     vault_on_success: bool = True,
     card: dict[str, Any] | None = None,
     customer_id: str | None = None,
+    customer_ref: str | None = None,
+    custom_id: str | None = None,
+    purpose: str = "onboarding",
     idempotency_key: str | None = None,
+    db: Any = None,
 ) -> dict[str, Any]:
     """Create an Orders v2 order and immediately capture it (server-side, no browser).
 
@@ -126,7 +130,11 @@ async def create_and_capture_order(
             attributes.vault.store_in_vault=ON_SUCCESS.
         card: Override the default sandbox test card dict.
         customer_id: PayPal customer id for vault attribution.
+        customer_ref: Merchant customer reference (recorded in charge_attempts).
+        custom_id: Tracking reference (defaults to cust:<customer_ref> if customer_ref given).
+        purpose: Business purpose ('onboarding' or 'renewal').
         idempotency_key: Deterministic key for PayPal-Request-Id.
+        db: Optional database handle.
 
     Returns:
         The full capture response body from PayPal.
@@ -138,18 +146,22 @@ async def create_and_capture_order(
     ref = reference_id or req_id
     card_data = card or SANDBOX_TEST_VISA
 
+    effective_custom_id = custom_id or (f"cust:{customer_ref}" if customer_ref else None)
+
+    pu: dict[str, Any] = {
+        "reference_id": ref[:127],
+        "description": description[:127],
+        "amount": {
+            "currency_code": currency,
+            "value": f"{amount:.2f}",
+        },
+    }
+    if effective_custom_id:
+        pu["custom_id"] = effective_custom_id[:127]
+
     order_payload: dict[str, Any] = {
         "intent": "CAPTURE",
-        "purchase_units": [
-            {
-                "reference_id": ref[:127],
-                "description": description[:127],
-                "amount": {
-                    "currency_code": currency,
-                    "value": f"{amount:.2f}",
-                },
-            }
-        ],
+        "purchase_units": [pu],
         "payment_source": _card_payment_source(
             card_data,
             vault_on_success=vault_on_success,
@@ -174,6 +186,20 @@ async def create_and_capture_order(
     order_status = order.get("status", "")
 
     logger.info("Created PayPal order %s status=%s", order_id, order_status)
+
+    if customer_ref and order_id:
+        try:
+            from app.gateways.paypal.charge_attempts import record_charge_attempt
+            await record_charge_attempt(
+                order_id=order_id,
+                customer_ref=customer_ref,
+                amount=amount,
+                currency=currency,
+                purpose=purpose,  # type: ignore[arg-type]
+                db=db,
+            )
+        except Exception as exc:
+            logger.debug("Could not record charge attempt for %s: %s", order_id, exc)
 
     # If the order was already COMPLETED (e.g. sandbox auto-capture), return it.
     if order_status == "COMPLETED":

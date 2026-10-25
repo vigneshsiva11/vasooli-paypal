@@ -151,6 +151,15 @@ COOLDOWN_MEASURED_FROM = COOLDOWN_FROM_EXECUTION
 # USD Profile Parameters (Step 2)
 # ---------------------------------------------------------------------------
 
+#: Payment advice codes verified as do-not-retry from fetched official documentation.
+DO_NOT_RETRY_ADVICE_CODES: frozenset[str] = frozenset({"03"})
+
+#: Processor response codes verified as do-not-retry from fetched official PayPal card testing documentation:
+#: https://developer.paypal.com/tools/sandbox/card-testing
+#: Trigger CCREJECT-SF -> 9500 SUSPECTED_FRAUD ("Try using another card. Do not retry the same card.")
+#: Trigger CCREJECT-IRC -> 5180 INVALID_OR_RESTRICTED_CARD ("Try using another card. Do not retry the same card.")
+DO_NOT_RETRY_RESPONSE_CODES: frozenset[str] = frozenset({"9500", "5180"})
+
 #: Minimum ERV worth acting on for USD events. Ratified at 1.00 USD.
 USD_MINIMUM_ERV = 1.00
 
@@ -193,6 +202,54 @@ INR_REASON_VERDICT: tuple[tuple[str, str], ...] = (
     ("ok", "authorized"),
 )
 
+_USD_REASON_PRECEDENCE_V1: tuple[str, ...] = (
+    "no_action_recommended",
+    "customer_opted_out",
+    "contact_cap_exceeded",
+    "cooldown_active",
+    "retry_not_advised",
+    "erv_below_minimum",
+    "amount_never_auto",
+    "amount_requires_approval",
+)
+
+_USD_REASON_VERDICT_V1: tuple[tuple[str, str], ...] = (
+    ("amount_never_auto", "requires_manual_review"),
+    ("amount_requires_approval", "requires_manual_review"),
+    ("contact_cap_exceeded", "blocked"),
+    ("cooldown_active", "blocked"),
+    ("customer_opted_out", "blocked"),
+    ("erv_below_minimum", "blocked"),
+    ("no_action_recommended", "blocked"),
+    ("ok", "authorized"),
+    ("retry_not_advised", "blocked"),
+)
+
+USD_REASON_PRECEDENCE: tuple[str, ...] = (
+    "no_action_recommended",
+    "customer_opted_out",
+    "contact_cap_exceeded",
+    "cooldown_active",
+    "retry_not_advised",
+    "retry_cap_exceeded",
+    "erv_below_minimum",
+    "amount_never_auto",
+    "amount_requires_approval",
+)
+
+USD_REASON_VERDICT: tuple[tuple[str, str], ...] = (
+    ("amount_never_auto", "requires_manual_review"),
+    ("amount_requires_approval", "requires_manual_review"),
+    ("contact_cap_exceeded", "blocked"),
+    ("cooldown_active", "blocked"),
+    ("customer_opted_out", "blocked"),
+    ("erv_below_minimum", "blocked"),
+    ("no_action_recommended", "blocked"),
+    ("ok", "authorized"),
+    ("retry_cap_exceeded", "blocked"),
+    ("retry_not_advised", "blocked"),
+)
+
 
 # ---------------------------------------------------------------------------
 # The rulebook in force.
@@ -219,8 +276,8 @@ def current_inr_rulebook() -> Rulebook:
     )
 
 
-def current_usd_rulebook() -> Rulebook:
-    """Snapshot the ratified USD policy parameters with fixed 1 USD = 83.00 INR conversion."""
+def superseded_usd_v1_rulebook() -> Rulebook:
+    """Historical USD rulebook v1 without retry cap (fingerprint rb1_c7c49bbd323ceed4)."""
     return Rulebook(
         minimum_erv=USD_MINIMUM_ERV,
         zero_cost_exempt_from_erv_floor=ZERO_COST_EXEMPT_FROM_ERV_FLOOR,
@@ -233,11 +290,56 @@ def current_usd_rulebook() -> Rulebook:
         cooldown_measured_from=COOLDOWN_MEASURED_FROM,
         no_action_interventions=frozenset(NO_ACTION_INTERVENTIONS),
         policy_checks=tuple(POLICY_CHECKS),
-        reason_precedence=tuple(REASON_PRECEDENCE),
-        reason_verdict=tuple(sorted(REASON_VERDICT.items())),
+        reason_precedence=_USD_REASON_PRECEDENCE_V1,
+        reason_verdict=_USD_REASON_VERDICT_V1,
         fx_rate_inr_per_usd=USD_FX_RATE_INR_PER_USD,
         intervention_costs=USD_INTERVENTION_COSTS_TUPLE,
         note=f"USD profile in force (fixed rate 1 USD = {USD_FX_RATE_INR_PER_USD:.2f} INR)",
+    )
+
+
+def superseded_usd_v2_rulebook() -> Rulebook:
+    """Historical USD rulebook v2 with retry cap (fingerprint rb1_f1e6f9c8957920de)."""
+    return Rulebook(
+        minimum_erv=USD_MINIMUM_ERV,
+        zero_cost_exempt_from_erv_floor=ZERO_COST_EXEMPT_FROM_ERV_FLOOR,
+        auto_authorize_below=USD_AUTO_AUTHORIZE_BELOW,
+        never_auto_at_or_above=USD_NEVER_AUTO_AT_OR_ABOVE,
+        tier_currency=USD_TIER_CURRENCY,
+        contact_interventions=frozenset(CONTACT_INTERVENTIONS),
+        max_contacts_per_event=MAX_CONTACTS_PER_EVENT,
+        cooldown_hours=COOLDOWN_HOURS,
+        cooldown_measured_from=COOLDOWN_MEASURED_FROM,
+        no_action_interventions=frozenset(NO_ACTION_INTERVENTIONS),
+        policy_checks=tuple(POLICY_CHECKS),
+        reason_precedence=USD_REASON_PRECEDENCE,
+        reason_verdict=USD_REASON_VERDICT,
+        fx_rate_inr_per_usd=USD_FX_RATE_INR_PER_USD,
+        intervention_costs=USD_INTERVENTION_COSTS_TUPLE,
+        note=f"USD profile in force with retry cap (fixed rate 1 USD = {USD_FX_RATE_INR_PER_USD:.2f} INR)",
+    )
+
+
+def current_usd_rulebook() -> Rulebook:
+    """Snapshot the ratified USD policy parameters with retry cap and do-not-retry response codes (fingerprint rb1_8221b1b9069ffc80)."""
+    return Rulebook(
+        minimum_erv=USD_MINIMUM_ERV,
+        zero_cost_exempt_from_erv_floor=ZERO_COST_EXEMPT_FROM_ERV_FLOOR,
+        auto_authorize_below=USD_AUTO_AUTHORIZE_BELOW,
+        never_auto_at_or_above=USD_NEVER_AUTO_AT_OR_ABOVE,
+        tier_currency=USD_TIER_CURRENCY,
+        contact_interventions=frozenset(CONTACT_INTERVENTIONS),
+        max_contacts_per_event=MAX_CONTACTS_PER_EVENT,
+        cooldown_hours=COOLDOWN_HOURS,
+        cooldown_measured_from=COOLDOWN_MEASURED_FROM,
+        no_action_interventions=frozenset(NO_ACTION_INTERVENTIONS),
+        policy_checks=tuple(POLICY_CHECKS),
+        reason_precedence=USD_REASON_PRECEDENCE,
+        reason_verdict=USD_REASON_VERDICT,
+        fx_rate_inr_per_usd=USD_FX_RATE_INR_PER_USD,
+        intervention_costs=USD_INTERVENTION_COSTS_TUPLE,
+        do_not_retry_response_codes=tuple(sorted(DO_NOT_RETRY_RESPONSE_CODES)),
+        note=f"USD profile in force with retry cap and do-not-retry response codes (fixed rate 1 USD = {USD_FX_RATE_INR_PER_USD:.2f} INR)",
     )
 
 
@@ -280,6 +382,10 @@ def current_fingerprint(currency: str = "INR") -> str:
 def rulebook_registry() -> dict[str, Rulebook]:
     """Every rulebook this build can identify, keyed by fingerprint."""
     registry = {rulebook.fingerprint: rulebook for rulebook in SUPERSEDED_RULEBOOKS}
+    usd_v1 = superseded_usd_v1_rulebook()
+    registry[usd_v1.fingerprint] = usd_v1
+    usd_v2 = superseded_usd_v2_rulebook()
+    registry[usd_v2.fingerprint] = usd_v2
     inr = current_inr_rulebook()
     usd = current_usd_rulebook()
     eur = unknown_currency_rulebook("EUR")

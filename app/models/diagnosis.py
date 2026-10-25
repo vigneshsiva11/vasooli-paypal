@@ -21,6 +21,7 @@ from app.models.events import Surface
 PaymentRootCause = Literal[
     "insufficient_funds",
     "card_expired",
+    "card_verification_failed",
     "issuer_declined",
     "temporary_processing_error",
     "suspected_fraud",

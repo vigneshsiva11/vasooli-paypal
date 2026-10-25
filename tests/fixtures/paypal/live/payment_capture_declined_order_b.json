@@ -1,0 +1,83 @@
+{
+  "create_time": "2026-10-25T05:55:56.082Z",
+  "event_type": "PAYMENT.CAPTURE.DECLINED",
+  "event_version": "1.0",
+  "id": "WH-4AF58932CR119514D-1KM26931PG851734B",
+  "links": [
+    {
+      "href": "https://api.sandbox.paypal.com/v1/notifications/webhooks-events/WH-4AF58932CR119514D-1KM26931PG851734B",
+      "method": "GET",
+      "rel": "self"
+    },
+    {
+      "href": "https://api.sandbox.paypal.com/v1/notifications/webhooks-events/WH-4AF58932CR119514D-1KM26931PG851734B/resend",
+      "method": "POST",
+      "rel": "resend"
+    }
+  ],
+  "resource": {
+    "amount": {
+      "currency_code": "USD",
+      "value": "5.00"
+    },
+    "create_time": "2026-10-25T05:55:50Z",
+    "custom_id": "cust:probe1",
+    "final_capture": true,
+    "id": "5LG46948JJ571544V",
+    "links": [
+      {
+        "href": "https://api.sandbox.paypal.com/v2/payments/captures/5LG46948JJ571544V",
+        "method": "GET",
+        "rel": "self"
+      },
+      {
+        "href": "https://api.sandbox.paypal.com/v2/checkout/orders/2CG62440G8279605F",
+        "method": "GET",
+        "rel": "up"
+      }
+    ],
+    "network_transaction_reference": {
+      "date": "0203",
+      "id": "000000000000000",
+      "network": "VISA"
+    },
+    "payee": {
+      "email_address": "sb-n3vd953304200@business.example.com",
+      "merchant_id": "FJD79RSJQC7BC"
+    },
+    "processor_response": {
+      "avs_code": "G",
+      "cvv_code": "P",
+      "response_code": "5120"
+    },
+    "seller_protection": {
+      "status": "NOT_ELIGIBLE"
+    },
+    "seller_receivable_breakdown": {
+      "gross_amount": {
+        "currency_code": "USD",
+        "value": "5.00"
+      },
+      "net_amount": {
+        "currency_code": "USD",
+        "value": "4.38"
+      },
+      "paypal_fee": {
+        "currency_code": "USD",
+        "value": "0.62"
+      }
+    },
+    "status": "DECLINED",
+    "supplementary_data": {
+      "related_ids": {
+        "order_id": "2CG62440G8279605F"
+      }
+    },
+    "update_time": "2026-10-25T05:55:50Z"
+  },
+  "resource_type": "capture",
+  "resource_version": "2.0",
+  "summary": "A payment capture for $ 5.0 USD was declined.",
+  "source": "captured",
+  "original_payload_sha256": "5c1b3b0e8a96236829bad8e6d1fba8b90d59f4c792ec1b39116c2966c5cf7ebd"
+}

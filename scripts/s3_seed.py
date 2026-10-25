@@ -72,11 +72,16 @@ SEEDS: list[tuple[str, str, float, str, str]] = [
 
 def post(path: str, payload: dict | None = None) -> tuple[int, dict]:
     """POST JSON and return (status, body)."""
+    import os
     data = json.dumps(payload).encode() if payload is not None else b""
+    headers = {"Content-Type": "application/json"}
+    token = os.environ.get("ADMIN_TOKEN")
+    if token:
+        headers["X-Admin-Token"] = token
     request = urllib.request.Request(
         f"{BASE}{path}",
         data=data,
-        headers={"Content-Type": "application/json"},
+        headers=headers,
         method="POST",
     )
     try:

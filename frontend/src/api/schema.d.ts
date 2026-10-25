@@ -371,6 +371,32 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/webhooks/paypal": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Receive and verify a PayPal sandbox webhook event
+         * @description Verify and store an inbound PayPal webhook event.
+         *
+         *     Status codes:
+         *     * **401** — PAYPAL_WEBHOOK_ID not configured, or PayPal returned
+         *       non-SUCCESS verification status.  PayPal will retry.
+         *     * **503** — PayPal's verify endpoint was unreachable.  PayPal retries.
+         *     * **200** — Event accepted (new) or already stored (duplicate).
+         */
+        post: operations["receive_paypal_webhook_webhooks_paypal_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/promises": {
         parameters: {
             query?: never;
@@ -512,6 +538,26 @@ export interface paths {
          *             reference changed underneath the call.
          */
         post: operations["check_promise_promises__event_id__check_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/metrics/currencies": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Currencies present with event counts
+         * @description List every currency present in stored events with its event count.
+         */
+        get: operations["metrics_currencies_metrics_currencies_get"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -669,6 +715,86 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/orchestrator/run/{event_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Run Orchestrator For Event
+         * @description Manually advance an event through the recovery orchestrator.
+         */
+        post: operations["run_orchestrator_for_event_orchestrator_run__event_id__post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/orchestrator/tick": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Orchestrator Tick
+         * @description Process up to N at_risk PayPal events through the orchestrator.
+         */
+        post: operations["orchestrator_tick_orchestrator_tick_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/sim/advance": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Advance Clock
+         * @description Advance the simulated clock by the specified number of hours.
+         */
+        post: operations["advance_clock_sim_advance_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/sim/clock": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Sim Clock
+         * @description Retrieve the current clock time and simulation status.
+         */
+        get: operations["get_sim_clock_sim_clock_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/": {
         parameters: {
             query?: never;
@@ -804,6 +930,22 @@ export interface components {
             computed_at: string;
         };
         /**
+         * CurrencyCount
+         * @description Currency and its event count.
+         */
+        CurrencyCount: {
+            /**
+             * Currency
+             * @description Currency code (e.g. 'INR', 'USD').
+             */
+            currency: string;
+            /**
+             * Count
+             * @description Number of events stored in this currency.
+             */
+            count: number;
+        };
+        /**
          * CustomerOptOut
          * @description A customer who must not be contacted.
          *
@@ -880,6 +1022,16 @@ export interface components {
              * @description Human-readable account of why this intervention won.
              */
             reasoning: string;
+            /**
+             * Excluded Interventions
+             * @description Interventions excluded from consideration (e.g. retries excluded due to missing vault token or advice code).
+             */
+            excluded_interventions?: string[] | null;
+            /**
+             * Exclusion Reason
+             * @description Reason why interventions were excluded.
+             */
+            exclusion_reason?: string | null;
             /**
              * Decided At
              * Format: date-time
@@ -1049,6 +1201,22 @@ export interface components {
              */
             action_type: "payment_link_generated" | "retry_simulated" | "contact_logged";
             /**
+             * Gateway
+             * @description Payment gateway used for execution.
+             * @default razorpay
+             */
+            gateway: string;
+            /**
+             * Gateway Ref
+             * @description Generic gateway reference (e.g. order_id, invoice_id, or payment_link_id).
+             */
+            gateway_ref?: string | null;
+            /**
+             * Gateway Url
+             * @description Generic gateway actionable URL (e.g. PayPal checkout/invoice URL or Razorpay link URL).
+             */
+            gateway_url?: string | null;
+            /**
              * Razorpay Payment Link Id
              * @description Razorpay's id for the generated link. Link actions only.
              */
@@ -1085,6 +1253,12 @@ export interface components {
              * @description Why the attempt failed. Required when status is 'failed'.
              */
             failure_reason?: string | null;
+            /**
+             * Simulated Time
+             * @description Whether execution was created under a simulated clock.
+             * @default false
+             */
+            simulated_time: boolean;
             /**
              * Id
              * @description MongoDB document id, rendered as a string.
@@ -1381,6 +1555,13 @@ export interface components {
              */
             verified_at?: string;
             /**
+             * Assertion
+             * @description Always 'merchant_asserted' for manual confirmations.
+             * @default merchant_asserted
+             * @enum {string}
+             */
+            assertion: "gateway_verified" | "merchant_asserted";
+            /**
              * @description A human asserted this. Not verified by any gateway, and reported separately from webhook recoveries wherever money is totalled. (enum property replaced by openapi-typescript)
              * @enum {string}
              */
@@ -1586,7 +1767,7 @@ export interface components {
              * @description Primary reason code, from the fixed set.
              * @enum {string}
              */
-            reason: "ok" | "no_action_recommended" | "customer_opted_out" | "contact_cap_exceeded" | "cooldown_active" | "erv_below_minimum" | "amount_never_auto" | "amount_requires_approval";
+            reason: "ok" | "no_action_recommended" | "customer_opted_out" | "contact_cap_exceeded" | "cooldown_active" | "retry_not_advised" | "retry_cap_exceeded" | "erv_below_minimum" | "unsupported_currency" | "amount_never_auto" | "amount_requires_approval";
             /**
              * Checks Performed
              * @description The complete evaluation trail: every check in POLICY_CHECKS, whether it passed or failed.
@@ -2093,6 +2274,25 @@ export interface components {
              */
             customer_ref: string;
             /**
+             * Gateway
+             * @description Payment gateway origin for the event.
+             * @default razorpay
+             * @enum {string}
+             */
+            gateway: "razorpay" | "paypal";
+            /**
+             * Gateway Ref
+             * @description Gateway's native reference for this charge or order, e.g. order_id or capture_id.
+             */
+            gateway_ref?: string | null;
+            /**
+             * Gateway Detail
+             * @description Gateway-specific detail, e.g. processor response and advice code.
+             */
+            gateway_detail?: {
+                [key: string]: unknown;
+            } | null;
+            /**
              * Created At
              * Format: date-time
              * @description When the event entered the system (UTC).
@@ -2143,6 +2343,25 @@ export interface components {
              * @description Merchant-side reference for the customer who owes the money.
              */
             customer_ref: string;
+            /**
+             * Gateway
+             * @description Payment gateway origin for the event.
+             * @default razorpay
+             * @enum {string}
+             */
+            gateway: "razorpay" | "paypal";
+            /**
+             * Gateway Ref
+             * @description Gateway's native reference for this charge or order, e.g. order_id or capture_id.
+             */
+            gateway_ref?: string | null;
+            /**
+             * Gateway Detail
+             * @description Gateway-specific detail, e.g. processor response and advice code.
+             */
+            gateway_detail?: {
+                [key: string]: unknown;
+            } | null;
             /**
              * Created At
              * Format: date-time
@@ -2203,6 +2422,15 @@ export interface components {
              */
             superseded_only: boolean;
         };
+        /** SimAdvanceRequest */
+        SimAdvanceRequest: {
+            /**
+             * Hours
+             * @description Number of hours to advance the clock
+             * @default 0
+             */
+            hours: number;
+        };
         /**
          * SimulatedBaseline
          * @description A what-if figure. `kind` is a `Literal`, so it cannot be relabelled real.
@@ -2249,6 +2477,15 @@ export interface components {
              * @description Where the probabilities came from. Never a new estimate.
              */
             probability_source: string;
+        };
+        /** TickRequest */
+        TickRequest: {
+            /**
+             * Limit
+             * @description Maximum at_risk events to process
+             * @default 10
+             */
+            limit: number;
         };
         /**
          * TimelineEntry
@@ -2465,26 +2702,54 @@ export interface components {
              */
             verified_at?: string;
             /**
+             * Assertion
+             * @description Always 'gateway_verified' for webhooks.
+             * @default gateway_verified
+             * @enum {string}
+             */
+            assertion: "gateway_verified" | "merchant_asserted";
+            /**
              * @description Razorpay's signed word. The default because it is the only source that existed before Stage 9, which is also what makes the read-time default in `source_of` correct for the records already stored. (enum property replaced by openapi-typescript)
              * @enum {string}
              */
             source: "webhook";
             /**
+             * Gateway
+             * @description Payment gateway that delivered or verified the webhook.
+             * @default razorpay
+             * @enum {string}
+             */
+            gateway: "razorpay" | "paypal";
+            /**
+             * Gateway Ref
+             * @description Generic gateway reference (e.g. PayPal capture_id, order_id, or Razorpay payment_link_id).
+             */
+            gateway_ref?: string | null;
+            /**
              * Razorpay Event Id
              * @description Razorpay's `x-razorpay-event-id` header, unique per event on their side. THE IDEMPOTENCY KEY: unique-indexed, so an at-least-once re-delivery is refused by the database and not merely skipped by a check that could lose a race. Absent from manual records, which is why that index is partial — see `app/webhooks/store.py`.
              */
-            razorpay_event_id: string;
+            razorpay_event_id?: string | null;
             /**
              * Razorpay Event
              * @description The event name Razorpay sent. Determines `outcome`.
-             * @enum {string}
              */
-            razorpay_event: "payment_link.paid" | "payment_link.expired" | "payment_link.cancelled";
+            razorpay_event?: ("payment_link.paid" | "payment_link.expired" | "payment_link.cancelled") | null;
             /**
              * Razorpay Payment Link Id
              * @description The link the payload named, as it arrived. Matched against the execution's own recorded link id at write time rather than trusted.
              */
-            razorpay_payment_link_id: string;
+            razorpay_payment_link_id?: string | null;
+            /**
+             * Paypal Event Id
+             * @description PayPal webhook event ID.
+             */
+            paypal_event_id?: string | null;
+            /**
+             * Paypal Event
+             * @description The event name PayPal sent. Determines `outcome`.
+             */
+            paypal_event?: ("PAYMENT.CAPTURE.COMPLETED" | "INVOICING.INVOICE.PAID" | "PAYMENT.CAPTURE.DECLINED") | null;
             /**
              * Id
              * @description MongoDB document id, rendered as a string.
@@ -2972,6 +3237,26 @@ export interface operations {
             };
         };
     };
+    receive_paypal_webhook_webhooks_paypal_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+        };
+    };
     list_promises_promises_get: {
         parameters: {
             query?: {
@@ -3139,9 +3424,32 @@ export interface operations {
             };
         };
     };
-    metrics_summary_metrics_summary_get: {
+    metrics_currencies_metrics_currencies_get: {
         parameters: {
             query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CurrencyCount"][];
+                };
+            };
+        };
+    };
+    metrics_summary_metrics_summary_get: {
+        parameters: {
+            query?: {
+                /** @description Currency filter */
+                currency?: string | null;
+            };
             header?: never;
             path?: never;
             cookie?: never;
@@ -3157,11 +3465,23 @@ export interface operations {
                     "application/json": components["schemas"]["MetricsSummary"];
                 };
             };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
         };
     };
     metrics_by_root_cause_metrics_by_root_cause_get: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description Currency filter */
+                currency?: string | null;
+            };
             header?: never;
             path?: never;
             cookie?: never;
@@ -3177,11 +3497,23 @@ export interface operations {
                     "application/json": components["schemas"]["RootCauseMetrics"][];
                 };
             };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
         };
     };
     metrics_by_intervention_metrics_by_intervention_get: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description Currency filter */
+                currency?: string | null;
+            };
             header?: never;
             path?: never;
             cookie?: never;
@@ -3197,11 +3529,23 @@ export interface operations {
                     "application/json": components["schemas"]["InterventionMetrics"][];
                 };
             };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
         };
     };
     metrics_promise_to_pay_metrics_promise_to_pay_get: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description Currency filter */
+                currency?: string | null;
+            };
             header?: never;
             path?: never;
             cookie?: never;
@@ -3217,11 +3561,23 @@ export interface operations {
                     "application/json": components["schemas"]["PromiseMetrics"];
                 };
             };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
         };
     };
     metrics_baseline_comparison_metrics_baseline_comparison_get: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description Currency filter */
+                currency?: string | null;
+            };
             header?: never;
             path?: never;
             cookie?: never;
@@ -3235,6 +3591,15 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["BaselineComparison"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };
@@ -3266,6 +3631,135 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    run_orchestrator_for_event_orchestrator_run__event_id__post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                event_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    orchestrator_tick_orchestrator_tick_post: {
+        parameters: {
+            query?: {
+                limit?: number | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["TickRequest"] | null;
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    advance_clock_sim_advance_post: {
+        parameters: {
+            query?: {
+                hours?: number | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["SimAdvanceRequest"] | null;
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_sim_clock_sim_clock_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
                 };
             };
         };

@@ -22,6 +22,7 @@ from app.diagnosis import check_reachable as check_gemini_reachable
 from app.diagnosis import ensure_indexes as ensure_diagnosis_indexes
 from app.execution import ensure_indexes as ensure_execution_indexes
 from app.ingestion import ensure_indexes as ensure_event_indexes
+from app.orchestrator import ensure_orchestrator_indexes
 from app.policy import ensure_indexes as ensure_policy_indexes
 from app.ptp import ensure_extraction_indexes
 from app.ptp import ensure_indexes as ensure_promise_indexes
@@ -31,9 +32,11 @@ from app.routes import (
     events,
     executions,
     metrics,
+    orchestrator,
     paypal_webhooks,
     policy,
     promises,
+    sim,
     webhooks,
 )
 from app.webhooks import ensure_indexes as ensure_verification_indexes
@@ -65,6 +68,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             await ensure_execution_indexes()
             await ensure_verification_indexes()
             await ensure_promise_indexes()
+            await ensure_orchestrator_indexes()
             # Stage 10. Its own collection, and none of its indexes is unique — see
             # `app/ptp/extraction_store.py` for why an extraction attempt is not a
             # fact that can only be true once.
@@ -119,6 +123,9 @@ app.include_router(promises.router)
 # Stage 7. Read-only: this router declares GET routes and nothing else, and calls
 # no index-ensuring function above because it creates no collection of its own.
 app.include_router(metrics.router)
+# Orchestrator & Simulation routers
+app.include_router(orchestrator.router)
+app.include_router(sim.router)
 
 
 @app.get("/", tags=["health"])

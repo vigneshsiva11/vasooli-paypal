@@ -35,7 +35,12 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 from app.db import close_mongo_connection, connect_to_mongo, get_database
 from app.decision import latest_decision
 from app.models import DecisionRecord
-from app.models.policy import CHECK_FOR_REASON, check_failed, check_name
+from app.models.policy import (
+    ALL_REASON_PRECEDENCE,
+    CHECK_FOR_REASON,
+    check_failed,
+    check_name,
+)
 from app.policy import (
     AUTO_AUTHORIZE_BELOW,
     COOLDOWN_HOURS,
@@ -63,11 +68,16 @@ observed: Counter[tuple[str, str]] = Counter()
 
 
 def request(path: str, method: str = "GET", payload: dict | None = None):
+    import os
     data = json.dumps(payload).encode() if payload is not None else b""
+    headers = {"Content-Type": "application/json"}
+    token = os.environ.get("ADMIN_TOKEN")
+    if token:
+        headers["X-Admin-Token"] = token
     req = urllib.request.Request(
         f"{BASE}{path}",
         data=data if method == "POST" else None,
-        headers={"Content-Type": "application/json"},
+        headers=headers,
         method=method,
     )
     try:
@@ -299,7 +309,7 @@ def coverage() -> None:
     section("4. Coverage of the verdict/reason space")
 
     print(f"  {'reason':<26} {'verdict':<24} observed")
-    for reason in ("ok",) + REASON_PRECEDENCE:
+    for reason in ("ok",) + ALL_REASON_PRECEDENCE:
         verdict = REASON_VERDICT[reason]
         count = observed[(verdict, reason)]
         check = CHECK_FOR_REASON.get(reason, "-")

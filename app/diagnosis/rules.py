@@ -9,10 +9,45 @@ Contains no LLM call and no network I/O by construction.
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass
 
 from app.models import RevenueEvent
+
+logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# PayPal response_code table (Step 3)
+#
+# Verified from PayPal's official Orders v2 / Payments v2 documentation:
+#   https://developer.paypal.com/docs/api/orders/v2/#definition-processor_response
+#
+# Existing members of PaymentRootCause:
+#   1. "insufficient_funds": Account lacks sufficient funds/credit line.
+#   2. "card_expired": Payment card details invalid/expired; customer must update details.
+#   3. "issuer_declined": General refusal by issuing bank without specific reason.
+#   4. "temporary_processing_error": Transient processing/network/system glitch.
+#   5. "suspected_fraud": Stolen card or risk block.
+#   6. "unknown": Unmapped fallback.
+#
+# Mapping justification:
+# - 5120 -> "insufficient_funds" (official PayPal definition: INSUFFICIENT_FUNDS)
+# - 0500 -> "issuer_declined" (official PayPal definition: DO_NOT_HONOR)
+# - 00N7 -> "card_expired" (official PayPal definition: CVV2_FAILURE_POSSIBLE_RETRY_WITH_CVV).
+#   Choice of PaymentRootCause for 00N7:
+#   Among the 6 existing members, "card_expired" is the canonical root cause indicating
+#   invalid or outdated payment card credentials that requires the customer to update
+#   their payment details. It is explicitly NOT a temporary_processing_error.
+#
+# Any code outside this verified table is unmapped and goes to the Gemini fallback path.
+# ---------------------------------------------------------------------------
+PAYPAL_RESPONSE_CODES: dict[str, tuple[str, float]] = {
+    "5120": ("insufficient_funds", 0.95),
+    "0500": ("issuer_declined", 0.95),
+    "00N7": ("card_verification_failed", 0.95),
+    "00n7": ("card_verification_failed", 0.95),
+}
 
 #: A rules classification at or above this confidence is trusted outright and the
 #: LLM is never called. Below it, the case is escalated for reasoning.
@@ -144,6 +179,36 @@ def classify(event: RevenueEvent, prior_event_count: int = 0) -> RuleMatch | Non
     if not reason:
         # No failure text at all. Common for abandoned checkouts, where absence of
         # a reason is itself uninformative, so there is nothing to be confident about.
+        return None
+
+    # PayPal response_code table check (Step 3)
+    is_paypal = getattr(event, "gateway", None) == "paypal"
+    raw_lower = reason.lower()
+    paypal_code: str | None = None
+    if raw_lower.startswith("paypal_"):
+        paypal_code = reason[7:].strip()
+    elif is_paypal and (reason in PAYPAL_RESPONSE_CODES or reason.upper() in PAYPAL_RESPONSE_CODES):
+        paypal_code = reason.strip()
+
+    if paypal_code is not None:
+        paypal_code_clean = paypal_code.upper()
+        entry = PAYPAL_RESPONSE_CODES.get(paypal_code) or PAYPAL_RESPONSE_CODES.get(paypal_code_clean)
+        if entry is not None:
+            root_cause, confidence = entry
+            return RuleMatch(
+                root_cause=root_cause,
+                confidence=confidence,
+                evidence=(
+                    f"PayPal processor reported code '{paypal_code}' ({root_cause})",
+                    *history_evidence,
+                ),
+            )
+        # Any other PayPal code is unmapped and goes to the Gemini fallback path
+        logger.info(
+            "Unmapped PayPal response_code %r on event %s; escalating to Gemini",
+            paypal_code,
+            event.event_id,
+        )
         return None
 
     normalised = _normalise(reason)

@@ -37,11 +37,16 @@ BASE = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8123"
 
 def request(path: str, method: str = "GET", payload: dict | None = None):
     """Issue a JSON request and return (status, body)."""
+    import os
     data = json.dumps(payload).encode() if payload is not None else None
+    headers = {"Content-Type": "application/json"}
+    token = os.environ.get("ADMIN_TOKEN")
+    if token:
+        headers["X-Admin-Token"] = token
     req = urllib.request.Request(
         f"{BASE}{path}",
         data=data if method == "POST" else None,
-        headers={"Content-Type": "application/json"},
+        headers=headers,
         method=method,
     )
     try:

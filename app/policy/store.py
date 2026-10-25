@@ -19,6 +19,7 @@ what the engine concluded.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import logging
 from typing import Any
 
@@ -267,6 +268,35 @@ async def prior_authorized_contacts(
     return len(anchors), max(anchors)
 
 
+async def prior_retry_executions(event_id: str) -> tuple[int, datetime | None]:
+    """Count completed and declined retry executions for this event and return (count, latest_executed_at)."""
+    executions = (
+        await get_database()[EXECUTION_COLLECTION]
+        .find(
+            {
+                "event_id": event_id,
+                "intervention": {"$in": ["immediate_retry", "delayed_retry"]},
+                "status": {"$in": ["completed", "declined"]},
+            },
+            {"executed_at": 1},
+        )
+        .sort("executed_at", DESCENDING)
+        .to_list(length=None)
+    )
+    if not executions:
+        return 0, None
+    anchors = [
+        doc["executed_at"].replace(tzinfo=timezone.utc)
+        if doc["executed_at"].tzinfo is None
+        else doc["executed_at"]
+        for doc in executions
+        if doc.get("executed_at") is not None
+    ]
+    if not anchors:
+        return len(executions), None
+    return len(executions), max(anchors)
+
+
 async def gather_context(
     *,
     decision: DecisionRecord,
@@ -289,15 +319,50 @@ async def gather_context(
     contacts, last_contact = await prior_authorized_contacts(
         decision.event_id, rulebook=rulebook
     )
+    retries, last_retry = await prior_retry_executions(decision.event_id)
 
     kwargs: dict[str, Any] = {
         "customer_ref": customer_ref,
         "customer_opted_out": opted_out,
         "prior_authorized_contacts": contacts,
         "last_authorized_contact_at": last_contact,
+        "prior_retry_executions": retries,
+        "last_retry_execution_at": last_retry,
     }
+    try:
+        event_doc = await get_database()["events"].find_one({"event_id": decision.event_id})
+        if event_doc and event_doc.get("gateway") == "paypal":
+            from app.gateways.paypal.vault import get_active_vault_token
+            db = get_database()
+            token = await get_active_vault_token(customer_ref, db)
+            kwargs["has_vault_token"] = bool(token)
+
+            gw_detail = event_doc.get("gateway_detail") or {}
+            advice_code = (
+                gw_detail.get("processor_response", {}).get("payment_advice_code")
+                or gw_detail.get("payment_advice_code")
+            )
+            if advice_code:
+                kwargs["payment_advice_code"] = str(advice_code)
+
+            resp_code = (
+                gw_detail.get("processor_response", {}).get("response_code")
+                or gw_detail.get("response_code")
+            )
+            if resp_code:
+                kwargs["processor_response_code"] = str(resp_code)
+    except Exception as exc:
+        logger.debug("Could not inspect event for vault/advice context: %s", exc)
+
     if now is not None:
         kwargs["now"] = now
+    else:
+        try:
+            from app.clock import get_clock
+            clock = await get_clock()
+            kwargs["now"] = clock.now()
+        except Exception as exc:
+            logger.debug("Could not read simulated clock for context.now: %s", exc)
     return PolicyContext(**kwargs)
 
 
