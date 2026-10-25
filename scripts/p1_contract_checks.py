@@ -2145,8 +2145,16 @@ def test_step8_settings_cors_origins() -> None:
     import typing
     from app.config import Settings
 
-    orig_cors = os.environ.get("CORS_ORIGINS")
-    orig_demo = os.environ.get("PUBLIC_DEMO")
+    env_vars_to_restore = [
+        "CORS_ORIGINS",
+        "PUBLIC_DEMO",
+        "AUTO_ORCHESTRATE",
+        "DEFAULT_CURRENCY",
+        "ADMIN_TOKEN",
+        "ENVIRONMENT",
+        "RENDER",
+    ]
+    saved_env = {k: os.environ.get(k) for k in env_vars_to_restore}
 
     forms = [
         ("unset", None, []),
@@ -2224,15 +2232,252 @@ def test_step8_settings_cors_origins() -> None:
                 True,
                 "no other list-typed fields present in Settings",
             )
+
+        # Empty environment variable fallback checks (env_ignore_empty=True)
+        # 1. AUTO_ORCHESTRATE="" -> False
+        os.environ["AUTO_ORCHESTRATE"] = ""
+        s_auto = Settings()
+        report(
+            "8.empty.auto_orchestrate: AUTO_ORCHESTRATE=\"\" falls back to default False",
+            s_auto.auto_orchestrate is False,
+            f"auto_orchestrate={s_auto.auto_orchestrate!r}",
+        )
+
+        # 2. PUBLIC_DEMO="" -> False
+        os.environ["PUBLIC_DEMO"] = ""
+        s_demo = Settings()
+        report(
+            "8.empty.public_demo: PUBLIC_DEMO=\"\" falls back to default False",
+            s_demo.public_demo is False,
+            f"public_demo={s_demo.public_demo!r}",
+        )
+
+        # 3. CORS_ORIGINS="" -> []
+        os.environ["CORS_ORIGINS"] = ""
+        s_cors = Settings()
+        report(
+            "8.empty.cors_origins: CORS_ORIGINS=\"\" falls back to default empty list []",
+            s_cors.cors_origins == [],
+            f"cors_origins={s_cors.cors_origins!r}",
+        )
+
+        # 4. DEFAULT_CURRENCY="" -> default
+        expected_default_currency = Settings.model_fields["default_currency"].default
+        os.environ["DEFAULT_CURRENCY"] = ""
+        s_curr = Settings()
+        report(
+            "8.empty.default_currency: DEFAULT_CURRENCY=\"\" falls back to default currency",
+            s_curr.default_currency == expected_default_currency,
+            f"default_currency={s_curr.default_currency!r}, expected={expected_default_currency!r}",
+        )
+
+        # 5. PUBLIC_DEMO=true with ADMIN_TOKEN="" still makes every write return 503 (fail closed must not weaken)
+        from fastapi import FastAPI
+        from starlette.testclient import TestClient
+        from app.middleware import PublicDemoMiddleware
+
+        os.environ["PUBLIC_DEMO"] = "true"
+        os.environ["ADMIN_TOKEN"] = ""
+        s_fc = Settings()
+
+        fc_app = FastAPI()
+        fc_app.add_middleware(PublicDemoMiddleware, settings=s_fc)
+
+        @fc_app.get("/items")
+        async def fc_get():
+            return {"items": []}
+
+        @fc_app.post("/items")
+        async def fc_post():
+            return {"created": True}
+
+        @fc_app.put("/items/1")
+        async def fc_put():
+            return {"updated": True}
+
+        @fc_app.delete("/items/1")
+        async def fc_delete():
+            return {"deleted": True}
+
+        @fc_app.post("/webhooks/paypal")
+        async def fc_pp():
+            return {"received": True}
+
+        fc_client = TestClient(fc_app)
+        r_fc_post_no_token = fc_client.post("/items", json={})
+        r_fc_post_with_token = fc_client.post("/items", json={}, headers={"X-Admin-Token": "some_token"})
+        r_fc_put = fc_client.put("/items/1", json={})
+        r_fc_delete = fc_client.delete("/items/1")
+        r_fc_get = fc_client.get("/items")
+        r_fc_webhook = fc_client.post("/webhooks/paypal", json={})
+
+        fail_closed_holds = (
+            s_fc.public_demo is True
+            and s_fc.admin_token == ""
+            and r_fc_post_no_token.status_code == 503
+            and r_fc_post_with_token.status_code == 503
+            and r_fc_put.status_code == 503
+            and r_fc_delete.status_code == 503
+            and r_fc_get.status_code == 200
+            and r_fc_webhook.status_code == 200
+        )
+        report(
+            "8.empty.public_demo_fail_closed: PUBLIC_DEMO=true with ADMIN_TOKEN=\"\" still makes every write return 503 (fail closed must not weaken)",
+            fail_closed_holds,
+            f"post_no_token={r_fc_post_no_token.status_code}, post_with_token={r_fc_post_with_token.status_code}, put={r_fc_put.status_code}, delete={r_fc_delete.status_code}, get={r_fc_get.status_code}, webhook={r_fc_webhook.status_code}",
+        )
+
+        # 6. Offline check: blank PUBLIC_DEMO in production refuses to start
+        os.environ["ENVIRONMENT"] = "production"
+        os.environ.pop("RENDER", None)
+        os.environ["PUBLIC_DEMO"] = ""
+        os.environ["ADMIN_TOKEN"] = "admin_secret_token_123"
+        prod_blank_demo_refused = False
+        prod_blank_demo_msg = ""
+        try:
+            Settings()
+        except RuntimeError as exc:
+            prod_blank_demo_refused = "public_demo" in str(exc) and "admin_secret_token_123" not in str(exc)
+            prod_blank_demo_msg = str(exc)
+        report(
+            "8.offline.prod_blank_public_demo: blank PUBLIC_DEMO in production refuses to start (names setting, zero secrets)",
+            prod_blank_demo_refused,
+            f"refused={prod_blank_demo_refused}, message={prod_blank_demo_msg!r}",
+        )
+
+        # 7. Offline check: blank ADMIN_TOKEN in production refuses
+        os.environ["ENVIRONMENT"] = "production"
+        os.environ.pop("RENDER", None)
+        os.environ["PUBLIC_DEMO"] = "true"
+        os.environ["ADMIN_TOKEN"] = ""
+        prod_blank_token_refused = False
+        prod_blank_token_msg = ""
+        try:
+            Settings()
+        except RuntimeError as exc:
+            prod_blank_token_refused = "admin_token" in str(exc)
+            prod_blank_token_msg = str(exc)
+        report(
+            "8.offline.prod_blank_admin_token: blank ADMIN_TOKEN in production refuses to start (names setting, zero secrets)",
+            prod_blank_token_refused,
+            f"refused={prod_blank_token_refused}, message={prod_blank_token_msg!r}",
+        )
+
+        # 8. Offline check: RENDER=true with blank PUBLIC_DEMO refuses
+        os.environ["ENVIRONMENT"] = "development"
+        os.environ["RENDER"] = "true"
+        os.environ["PUBLIC_DEMO"] = ""
+        os.environ["ADMIN_TOKEN"] = "admin_secret_token_123"
+        render_blank_demo_refused = False
+        render_blank_demo_msg = ""
+        try:
+            Settings()
+        except RuntimeError as exc:
+            render_blank_demo_refused = "public_demo" in str(exc) and "admin_secret_token_123" not in str(exc)
+            render_blank_demo_msg = str(exc)
+        report(
+            "8.offline.render_blank_public_demo: blank PUBLIC_DEMO when RENDER is set refuses to start",
+            render_blank_demo_refused,
+            f"refused={render_blank_demo_refused}, message={render_blank_demo_msg!r}",
+        )
+
+        # 9. Offline check: RENDER=true with blank ADMIN_TOKEN refuses
+        os.environ["ENVIRONMENT"] = "development"
+        os.environ["RENDER"] = "true"
+        os.environ["PUBLIC_DEMO"] = "true"
+        os.environ["ADMIN_TOKEN"] = ""
+        render_blank_token_refused = False
+        render_blank_token_msg = ""
+        try:
+            Settings()
+        except RuntimeError as exc:
+            render_blank_token_refused = "admin_token" in str(exc)
+            render_blank_token_msg = str(exc)
+        report(
+            "8.offline.render_blank_admin_token: blank ADMIN_TOKEN when RENDER is set refuses to start",
+            render_blank_token_refused,
+            f"refused={render_blank_token_refused}, message={render_blank_token_msg!r}",
+        )
+
+        # 10. Offline check: privileged route without a token returns 401 even with PUBLIC_DEMO off when a token is configured
+        os.environ["ENVIRONMENT"] = "development"
+        os.environ.pop("RENDER", None)
+        os.environ["PUBLIC_DEMO"] = "false"
+        os.environ["ADMIN_TOKEN"] = "custom_admin_token"
+        s_priv = Settings()
+
+        from app.auth import require_admin_privileged
+        from fastapi import Depends, FastAPI
+
+        priv_app = FastAPI()
+        priv_app.state.settings = s_priv
+        @priv_app.post("/demo/reset", dependencies=[Depends(require_admin_privileged)])
+        async def priv_reset():
+            return {"reset": True}
+
+        @priv_app.post("/sim/advance", dependencies=[Depends(require_admin_privileged)])
+        async def priv_advance():
+            return {"advanced": True}
+
+        @priv_app.post("/orchestrator/tick", dependencies=[Depends(require_admin_privileged)])
+        async def priv_tick():
+            return {"ticked": True}
+
+        c_priv = TestClient(priv_app)
+        r_priv_no_token = c_priv.post("/demo/reset")
+        r_priv_wrong_token = c_priv.post("/demo/reset", headers={"X-Admin-Token": "bad"})
+        r_priv_valid_token = c_priv.post("/demo/reset", headers={"X-Admin-Token": "custom_admin_token"})
+        r_sim_no_token = c_priv.post("/sim/advance")
+        r_sim_valid_token = c_priv.post("/sim/advance", headers={"X-Admin-Token": "custom_admin_token"})
+        r_orch_no_token = c_priv.post("/orchestrator/tick")
+        r_orch_valid_token = c_priv.post("/orchestrator/tick", headers={"X-Admin-Token": "custom_admin_token"})
+
+        priv_401_holds = (
+            r_priv_no_token.status_code == 401
+            and r_priv_wrong_token.status_code == 401
+            and r_priv_valid_token.status_code == 200
+            and r_sim_no_token.status_code == 401
+            and r_sim_valid_token.status_code == 200
+            and r_orch_no_token.status_code == 401
+            and r_orch_valid_token.status_code == 200
+        )
+        report(
+            "8.offline.privileged_route_token_required: privileged route without token returns 401 even with PUBLIC_DEMO off when token is configured",
+            priv_401_holds,
+            f"no_token={r_priv_no_token.status_code}, wrong={r_priv_wrong_token.status_code}, valid={r_priv_valid_token.status_code}",
+        )
+
+        # 11. Offline check: local still starts without them
+        os.environ["ENVIRONMENT"] = "development"
+        os.environ.pop("RENDER", None)
+        os.environ.pop("PUBLIC_DEMO", None)
+        os.environ.pop("ADMIN_TOKEN", None)
+        s_local_default = Settings()
+        priv_app_local = FastAPI()
+        priv_app_local.state.settings = s_local_default
+        @priv_app_local.post("/demo/reset", dependencies=[Depends(require_admin_privileged)])
+        async def priv_reset_local():
+            return {"reset": True}
+
+        c_local = TestClient(priv_app_local)
+        r_local_no_token = c_local.post("/demo/reset")
+        local_starts_and_allows = (
+            s_local_default.is_production is False
+            and s_local_default.public_demo is False
+            and s_local_default.admin_token == ""
+            and r_local_no_token.status_code == 200
+        )
+        report(
+            "8.offline.local_starts_without_tokens: local starts without PUBLIC_DEMO or ADMIN_TOKEN and privileged routes allow writes",
+            local_starts_and_allows,
+            f"is_production={s_local_default.is_production}, public_demo={s_local_default.public_demo}, admin_token={s_local_default.admin_token!r}, status={r_local_no_token.status_code}",
+        )
     finally:
-        if orig_cors is None:
-            os.environ.pop("CORS_ORIGINS", None)
-        else:
-            os.environ["CORS_ORIGINS"] = orig_cors
-        if orig_demo is None:
-            os.environ.pop("PUBLIC_DEMO", None)
-        else:
-            os.environ["PUBLIC_DEMO"] = orig_demo
+        for k, v in saved_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
 
 
 def test_step9_paypal_capture_declined_and_vault() -> None:

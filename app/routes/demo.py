@@ -32,11 +32,11 @@ from app.gateways.paypal import orders
 from app.gateways.paypal.charge_attempts import ensure_indexes as ensure_charge_indexes
 from app.gateways.paypal.vault import ensure_indexes as ensure_vault_indexes
 from app.ingestion import ensure_indexes as ensure_event_indexes
+from app.auth import require_admin_privileged
 from app.orchestrator.runs import ensure_orchestrator_indexes
 from app.orchestrator.service import advance as orchestrator_advance
 from app.policy import ensure_indexes as ensure_policy_indexes
 from app.routes.paypal_webhooks import ensure_paypal_event_indexes
-from app.routes.sim import require_admin_if_public_demo
 from app.webhooks import ensure_indexes as ensure_verification_indexes
 
 logger = logging.getLogger(__name__)
@@ -202,7 +202,7 @@ async def reset_demo_database(db: Any = None) -> dict[str, Any]:
     }
 
 
-@router.post("/reset", dependencies=[Depends(require_admin_if_public_demo)])
+@router.post("/reset", dependencies=[Depends(require_admin_privileged)])
 async def demo_reset() -> dict[str, Any]:
     """Admin-guarded demo database reset."""
     try:
@@ -243,7 +243,7 @@ STEP_NAMES = [
 
 @router.post(
     "/scenarios/insufficient-funds",
-    dependencies=[Depends(require_admin_if_public_demo)],
+    dependencies=[Depends(require_admin_privileged)],
     status_code=status.HTTP_202_ACCEPTED,
 )
 async def run_insufficient_funds_scenario(

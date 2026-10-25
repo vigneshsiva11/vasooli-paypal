@@ -1,0 +1,104 @@
+﻿{
+    "runs":  [
+                 {
+                     "run_id":  "6ade384208158ce68afa0c72",
+                     "scenario":  "insufficient-funds",
+                     "customer_ref":  "demo-001",
+                     "amount":  49.0,
+                     "currency":  "USD",
+                     "advance_hours":  72.0,
+                     "status":  "recovered",
+                     "current_step":  "verified",
+                     "steps":  [
+                                   {
+                                       "name":  "onboard",
+                                       "status":  "completed",
+                                       "started_at":  "2026-10-25T17:11:31.051000Z",
+                                       "finished_at":  "2026-10-25T17:11:57.547000Z",
+                                       "source":  "paypal",
+                                       "refs":  {
+                                                    "order_id":  "8HT525166F692834P",
+                                                    "customer_ref":  "demo-001"
+                                                }
+                                   },
+                                   {
+                                       "name":  "renewal_attempt",
+                                       "status":  "completed",
+                                       "started_at":  "2026-10-25T17:11:57.806000Z",
+                                       "finished_at":  "2026-10-25T17:12:01.635000Z",
+                                       "source":  "paypal_sandbox_simulation",
+                                       "refs":  {
+                                                    "order_id":  "1D507237DH868642P",
+                                                    "capture_status":  "DECLINED",
+                                                    "processor_response_code":  "5120"
+                                                }
+                                   },
+                                   {
+                                       "name":  "decline_ingested",
+                                       "status":  "completed",
+                                       "started_at":  "2026-10-25T17:12:01.870000Z",
+                                       "finished_at":  "2026-10-25T17:12:17.959000Z",
+                                       "source":  "paypal_webhook",
+                                       "refs":  {
+                                                    "event_id":  "pp_1S516725TC989164G",
+                                                    "order_id":  "1D507237DH868642P"
+                                                }
+                                   },
+                                   {
+                                       "name":  "pipeline",
+                                       "status":  "completed",
+                                       "started_at":  "2026-10-25T17:12:18.195000Z",
+                                       "finished_at":  "2026-10-25T17:12:32.910000Z",
+                                       "source":  "orchestrator",
+                                       "refs":  {
+                                                    "diagnosis_id":  "6ade387308158ce68afa0c79",
+                                                    "decision_id":  "6ade387508158ce68afa0c7b",
+                                                    "policy_verdict_id":  "6ade387808158ce68afa0c7d",
+                                                    "verdict":  "authorized",
+                                                    "execution_id":  "6ade387a08158ce68afa0c7f"
+                                                }
+                                   },
+                                   {
+                                       "name":  "clock",
+                                       "status":  "completed",
+                                       "started_at":  "2026-10-25T17:12:33.146000Z",
+                                       "finished_at":  "2026-10-25T17:12:33.847000Z",
+                                       "source":  "simulated_clock",
+                                       "refs":  {
+                                                    "advance_hours":  72.0
+                                                }
+                                   },
+                                   {
+                                       "name":  "retry_executed",
+                                       "status":  "completed",
+                                       "started_at":  "2026-10-25T17:12:34.081000Z",
+                                       "finished_at":  "2026-10-25T17:12:34.558000Z",
+                                       "source":  "paypal",
+                                       "refs":  {
+                                                    "execution_id":  "6ade387a08158ce68afa0c7f",
+                                                    "gateway_ref":  "7V005275E9996243D",
+                                                    "successful":  true,
+                                                    "capture_status":  "COMPLETED",
+                                                    "processor_response_code":  "0000"
+                                                }
+                                   },
+                                   {
+                                       "name":  "verified",
+                                       "status":  "completed",
+                                       "started_at":  "2026-10-25T17:12:34.798000Z",
+                                       "finished_at":  "2026-10-25T17:12:51.128000Z",
+                                       "source":  "paypal_webhook",
+                                       "refs":  {
+                                                    "verification_id":  "6ade389108158ce68afa0c82",
+                                                    "event_id":  "pp_1S516725TC989164G",
+                                                    "outcome":  "recovered"
+                                                }
+                                   }
+                               ],
+                     "final_status":  "recovered",
+                     "created_at":  "2026-10-25T17:11:30.815000Z",
+                     "updated_at":  "2026-10-25T17:12:51.365000Z"
+                 }
+             ],
+    "total":  1
+}

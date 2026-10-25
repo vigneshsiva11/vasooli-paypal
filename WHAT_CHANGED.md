@@ -45,3 +45,7 @@ Baseline: the original Vasooli repository at tag `razorpay-buildathon-submission
 - Server-side scenario runner (insufficient-funds): onboard with a vaulted card, a sandbox-simulated decline, orchestrated retry on the vaulted card, verified by a signed webhook; every step is labelled with its source.
 - Demo reset restricted to an allowlist and the sandbox; declined recovery attempts are typed outcomes, never exceptions.
 - Live sandbox probe confirmed custom_id appears in decline and completion webhooks; fixtures saved with hashes.
+
+## 2026-10-26: First live run and production guard
+- Hosted run completed on the sandbox: card onboarding vaulted, a simulated decline (5120), an orchestrated retry on the vaulted card, and a signed PAYMENT.CAPTURE.COMPLETED webhook marking the event recovered. Evidence: docs/evidence/live-run-2026-10-25.json.
+- Production startup now refuses to run without the demo guard and an admin token; privileged routes check the token independently.

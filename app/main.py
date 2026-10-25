@@ -56,6 +56,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     A failed connection is logged rather than fatal, so the health endpoint stays
     reachable and can report the database as `disconnected`.
     """
+    current_settings = getattr(app.state, "settings", None) or get_settings()
+    if current_settings.is_production:
+        if not current_settings.public_demo:
+            raise RuntimeError(
+                "Startup refused in production: 'public_demo' must be True (PUBLIC_DEMO=true)"
+            )
+        if not (current_settings.admin_token or "").strip():
+            raise RuntimeError(
+                "Startup refused in production: 'admin_token' must be non-empty (ADMIN_TOKEN must be configured)"
+            )
+
     try:
         await connect_to_mongo()
     except Exception:  # noqa: BLE001 - startup should surface, not crash silently
@@ -96,6 +107,7 @@ app = FastAPI(
     version="0.1.0",
     lifespan=lifespan,
 )
+app.state.settings = settings
 
 cors_origins = settings.cors_origins if settings.public_demo else ["*"]
 

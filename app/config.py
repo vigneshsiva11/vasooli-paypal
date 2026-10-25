@@ -1,11 +1,66 @@
 """Application settings, loaded from environment variables / `.env`."""
 
 import json
+import os
 from functools import lru_cache
-from typing import Annotated, Any
+from pathlib import Path
+from typing import Annotated, Any, Mapping
 
-from pydantic import Field, field_validator
-from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+from pydantic import Field, field_validator, model_validator
+from pydantic_settings import (
+    BaseSettings,
+    DotEnvSettingsSource,
+    EnvSettingsSource,
+    NoDecode,
+    PydanticBaseSettingsSource,
+    SettingsConfigDict,
+)
+
+
+class SecurityAwareEnvSource(EnvSettingsSource):
+    """Env source that preserves empty security flags so they fail closed.
+
+    When `env_ignore_empty=True` is enabled on the model, empty environment variables
+    are otherwise stripped and fall back to `.env` or defaults. For security flags
+    (`public_demo` and `admin_token`), empty values in the real environment must NOT
+    be ignored, ensuring they fail closed.
+    """
+
+    def _load_env_vars(self) -> Mapping[str, str | None]:
+        vars_dict = dict(super()._load_env_vars())
+        for key, val in os.environ.items():
+            norm_key = key if self.case_sensitive else key.lower()
+            if norm_key in ("public_demo", "admin_token"):
+                if val == "" or val is None:
+                    vars_dict[norm_key] = ""
+        return vars_dict
+
+
+class SecurityAwareDotEnvSource(DotEnvSettingsSource):
+    """DotEnv source that preserves empty security flags so they fail closed."""
+
+    def _read_env_files(self) -> Mapping[str, str | None]:
+        vars_dict = dict(super()._read_env_files())
+        env_files = self.env_file
+        if env_files is None:
+            return vars_dict
+        if isinstance(env_files, (str, os.PathLike)):
+            env_files = [env_files]
+        for env_file in env_files:
+            p = Path(env_file).expanduser()
+            if p.is_file():
+                raw = self._static_read_env_file(
+                    p,
+                    encoding=self.env_file_encoding,
+                    case_sensitive=self.case_sensitive,
+                    ignore_empty=False,
+                    parse_none_str=self.env_parse_none_str,
+                )
+                for k, v in raw.items():
+                    norm_key = k if self.case_sensitive else k.lower()
+                    if norm_key in ("public_demo", "admin_token") and v == "":
+                        vars_dict[norm_key] = ""
+        return vars_dict
 
 
 class Settings(BaseSettings):
@@ -20,6 +75,7 @@ class Settings(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8",
         extra="ignore",
+        env_ignore_empty=True,
     )
 
     # Application
@@ -30,10 +86,84 @@ class Settings(BaseSettings):
     # Public-demo guard
     public_demo: bool = False
     admin_token: str = ""
+    render: str = ""
     cors_origins: Annotated[list[str], NoDecode] = Field(default_factory=list)
 
     # Orchestrator
     auto_orchestrate: bool = False
+
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings: PydanticBaseSettingsSource,
+        env_settings: PydanticBaseSettingsSource,
+        dotenv_settings: PydanticBaseSettingsSource,
+        file_secret_settings: PydanticBaseSettingsSource,
+    ) -> tuple[PydanticBaseSettingsSource, ...]:
+        custom_env = SecurityAwareEnvSource(settings_cls)
+        custom_dotenv = (
+            SecurityAwareDotEnvSource(
+                settings_cls,
+                env_file=getattr(dotenv_settings, "env_file", None),
+                env_file_encoding=getattr(dotenv_settings, "env_file_encoding", None),
+                case_sensitive=getattr(dotenv_settings, "case_sensitive", None),
+                env_parse_none_str=getattr(dotenv_settings, "env_parse_none_str", None),
+            )
+            if isinstance(dotenv_settings, DotEnvSettingsSource)
+            else dotenv_settings
+        )
+        return init_settings, custom_env, custom_dotenv, file_secret_settings
+
+    @field_validator("public_demo", mode="before")
+    @classmethod
+    def _parse_public_demo(cls, v: Any) -> bool:
+        if v is None:
+            return False
+        if isinstance(v, str):
+            s = v.strip().lower()
+            if not s:
+                return False
+            if s in ("1", "true", "yes", "on", "t"):
+                return True
+            if s in ("0", "false", "no", "off", "f"):
+                return False
+            return False  # Fail closed for any invalid or unrecognised string
+        if isinstance(v, bool):
+            return v
+        return bool(v)
+
+    @field_validator("admin_token", mode="before")
+    @classmethod
+    def _parse_admin_token(cls, v: Any) -> str:
+        if v is None:
+            return ""
+        return str(v).strip()
+
+    @property
+    def is_production(self) -> bool:
+        """Check whether the app is running in a production environment."""
+        env_str = (self.environment or "").strip().lower()
+        if env_str == "production":
+            return True
+        render_val = (self.render or os.environ.get("RENDER") or "").strip()
+        if render_val:
+            return True
+        return False
+
+    @model_validator(mode="after")
+    def _validate_production_security(self) -> "Settings":
+        """In production, refuse to start unless public_demo is True and admin_token is non-empty."""
+        if self.is_production:
+            if not self.public_demo:
+                raise RuntimeError(
+                    "Startup refused in production: 'public_demo' must be True (PUBLIC_DEMO=true)"
+                )
+            if not (self.admin_token or "").strip():
+                raise RuntimeError(
+                    "Startup refused in production: 'admin_token' must be non-empty (ADMIN_TOKEN must be configured)"
+                )
+        return self
 
     @field_validator("cors_origins", mode="before")
     @classmethod
@@ -85,7 +215,6 @@ class Settings(BaseSettings):
     @property
     def paypal_environment(self) -> str:
         return self.paypal_env
-
 
 
 @lru_cache

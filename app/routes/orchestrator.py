@@ -7,44 +7,29 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel, Field
 
+from app.auth import require_admin_if_public_demo, require_admin_privileged
 from app.config import get_settings
 from app.db import get_database
 from app.orchestrator.service import advance
 
-router = APIRouter(prefix="/orchestrator", tags=["orchestrator"])
-
-
-def require_admin_if_public_demo(request: Request) -> None:
-    """Ensure admin token is provided when public demo mode is enabled."""
-    settings = get_settings()
-    if not settings.public_demo:
-        return
-
-    expected = (settings.admin_token or "").strip()
-    if not expected:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Service unavailable: operations disabled in public demo mode",
-        )
-    token = request.headers.get("X-Admin-Token")
-    if not token or not hmac.compare_digest(token.encode("utf-8"), expected.encode("utf-8")):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Unauthorized: invalid or missing X-Admin-Token",
-        )
+router = APIRouter(
+    prefix="/orchestrator",
+    tags=["orchestrator"],
+    dependencies=[Depends(require_admin_privileged)],
+)
 
 
 class TickRequest(BaseModel):
     limit: int = Field(default=10, ge=1, le=100, description="Maximum at_risk events to process")
 
 
-@router.post("/run/{event_id}", dependencies=[Depends(require_admin_if_public_demo)])
+@router.post("/run/{event_id}", dependencies=[Depends(require_admin_privileged)])
 async def run_orchestrator_for_event(event_id: str) -> dict[str, Any]:
     """Manually advance an event through the recovery orchestrator."""
     return await advance(event_id)
 
 
-@router.post("/tick", dependencies=[Depends(require_admin_if_public_demo)])
+@router.post("/tick", dependencies=[Depends(require_admin_privileged)])
 async def orchestrator_tick(
     payload: TickRequest | None = None,
     limit: int | None = Query(default=None, ge=1, le=100),
