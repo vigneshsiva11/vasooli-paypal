@@ -14,7 +14,7 @@ import asyncio
 import logging
 import time
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from bson import ObjectId
@@ -59,6 +59,87 @@ OPERATIONAL_COLLECTIONS = [
     "paypal_events",
     "sim_clock",
 ]
+
+
+# ---------------------------------------------------------------------------
+# Timeout and Staleness Configuration
+# ---------------------------------------------------------------------------
+STALE_RUN_TIMEOUT_SECONDS = 600.0  # 10 minutes
+WORST_OBSERVED_WEBHOOK_LATENCY_SECONDS = 61.85  # Order A live fixture
+STEP_TIMEOUT_SECONDS = max(180.0, 3 * WORST_OBSERVED_WEBHOOK_LATENCY_SECONDS)  # 185.55s
+TOTAL_RUN_TIMEOUT_SECONDS = 12 * 60.0  # 720.0s (12 minutes)
+
+
+def _parse_ts(val: Any) -> datetime | None:
+    if isinstance(val, datetime):
+        return val if val.tzinfo else val.replace(tzinfo=timezone.utc)
+    if isinstance(val, str):
+        try:
+            dt = datetime.fromisoformat(val.replace("Z", "+00:00"))
+            return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+        except Exception:
+            return None
+    return None
+
+
+async def self_heal_stale_runs(db: Any = None) -> int:
+    """Self-heal any demo runs still marked 'running' whose last step update is older than 10 minutes.
+
+    Marks them failed(step, "stale") and releases the active-run lock.
+    """
+    database = db if db is not None else get_database()
+    now = _utc_now()
+    threshold = now - timedelta(seconds=STALE_RUN_TIMEOUT_SECONDS)
+
+    cursor = database.demo_runs.find({"status": "running"})
+    running_runs = await cursor.to_list(length=100)
+    healed_count = 0
+
+    for run in running_runs:
+        timestamps: list[datetime] = []
+        for ts_val in (run.get("updated_at"), run.get("created_at")):
+            parsed = _parse_ts(ts_val)
+            if parsed:
+                timestamps.append(parsed)
+
+        for s in run.get("steps", []):
+            for step_ts in (s.get("started_at"), s.get("finished_at")):
+                parsed = _parse_ts(step_ts)
+                if parsed:
+                    timestamps.append(parsed)
+
+        last_update = max(timestamps) if timestamps else None
+        if last_update and last_update < threshold:
+            curr_step = run.get("current_step") or "onboard"
+            curr_idx = 0
+            steps = run.get("steps", [])
+            for i, s in enumerate(steps):
+                if s.get("name") == curr_step:
+                    curr_idx = i
+                    break
+
+            await database.demo_runs.update_one(
+                {"_id": run["_id"], "status": "running"},
+                {
+                    "$set": {
+                        "status": "failed",
+                        "final_status": f'failed({curr_step}, "stale")',
+                        "updated_at": now,
+                        f"steps.{curr_idx}.status": "failed",
+                        f"steps.{curr_idx}.finished_at": now,
+                        f"steps.{curr_idx}.refs.error": "stale",
+                    }
+                },
+            )
+            healed_count += 1
+            logger.info(
+                "Self-healed stale demo run %s (stale at step %s, last update was %s)",
+                run.get("run_id"),
+                curr_step,
+                last_update,
+            )
+
+    return healed_count
 
 
 async def ensure_demo_run_indexes(db: Any = None) -> None:
@@ -197,6 +278,9 @@ async def run_insufficient_funds_scenario(
     db = get_database()
     await ensure_demo_run_indexes(db)
 
+    # 0. Self-heal stale runs (>10m without step update)
+    await self_heal_stale_runs(db)
+
     # 1. Single active run check
     active_run = await db.demo_runs.find_one({"status": "running"})
     if active_run:
@@ -275,6 +359,7 @@ async def _execute_scenario_run(
     db = get_database()
     current_event_id: str | None = None
     step_idx = 0
+    run_start_time = time.monotonic()
 
     async def update_step(idx: int, **fields: Any) -> None:
         set_dict = {f"steps.{idx}.{k}": v for k, v in fields.items()}
@@ -311,7 +396,7 @@ async def _execute_scenario_run(
                 finished_at=_utc_now(),
                 source="customer_vault",
                 refs={
-                    "vault_token_id": vault_doc.get("vault_token_id"),
+                    "vaulted": True,
                     "customer_ref": customer_ref,
                 },
             )
@@ -329,7 +414,9 @@ async def _execute_scenario_run(
 
             token_found = None
             start_t = time.monotonic()
-            while time.monotonic() - start_t < 90.0:
+            while time.monotonic() - start_t < STEP_TIMEOUT_SECONDS:
+                if time.monotonic() - run_start_time >= TOTAL_RUN_TIMEOUT_SECONDS:
+                    break
                 token_found = await db.customer_vault.find_one(
                     {"customer_ref": customer_ref, "status": "active"}
                 )
@@ -353,7 +440,7 @@ async def _execute_scenario_run(
                 finished_at=_utc_now(),
                 refs={
                     "order_id": order_id,
-                    "vault_token_id": token_found.get("vault_token_id"),
+                    "vaulted": True,
                     "customer_ref": customer_ref,
                 },
             )
@@ -362,6 +449,11 @@ async def _execute_scenario_run(
         # Step 2: renewal_attempt
         # -------------------------------------------------------------------
         step_idx = 1
+        if time.monotonic() - run_start_time >= TOTAL_RUN_TIMEOUT_SECONDS:
+            await update_step(step_idx, status="timeout", finished_at=_utc_now(), refs={"error": "total_run_cap_exceeded"})
+            await set_run_final("timeout", f"timeout({STEP_NAMES[step_idx]})")
+            return
+
         await update_step(
             step_idx, status="running", started_at=_utc_now(), source="paypal_sandbox_simulation"
         )
@@ -397,12 +489,19 @@ async def _execute_scenario_run(
         # Step 3: decline_ingested
         # -------------------------------------------------------------------
         step_idx = 2
+        if time.monotonic() - run_start_time >= TOTAL_RUN_TIMEOUT_SECONDS:
+            await update_step(step_idx, status="timeout", finished_at=_utc_now(), refs={"error": "total_run_cap_exceeded"})
+            await set_run_final("timeout", f"timeout({STEP_NAMES[step_idx]})")
+            return
+
         await update_step(
             step_idx, status="running", started_at=_utc_now(), source="paypal_webhook"
         )
         event_doc = None
         start_t = time.monotonic()
-        while time.monotonic() - start_t < 90.0:
+        while time.monotonic() - start_t < STEP_TIMEOUT_SECONDS:
+            if time.monotonic() - run_start_time >= TOTAL_RUN_TIMEOUT_SECONDS:
+                break
             event_doc = await db.events.find_one(
                 {"customer_ref": customer_ref, "status": "at_risk"}
             )
@@ -432,6 +531,11 @@ async def _execute_scenario_run(
         # Step 4: pipeline
         # -------------------------------------------------------------------
         step_idx = 3
+        if time.monotonic() - run_start_time >= TOTAL_RUN_TIMEOUT_SECONDS:
+            await update_step(step_idx, status="timeout", finished_at=_utc_now(), refs={"error": "total_run_cap_exceeded"})
+            await set_run_final("timeout", f"timeout({STEP_NAMES[step_idx]})")
+            return
+
         await update_step(
             step_idx, status="running", started_at=_utc_now(), source="orchestrator"
         )
@@ -479,6 +583,11 @@ async def _execute_scenario_run(
         # Step 5: clock
         # -------------------------------------------------------------------
         step_idx = 4
+        if time.monotonic() - run_start_time >= TOTAL_RUN_TIMEOUT_SECONDS:
+            await update_step(step_idx, status="timeout", finished_at=_utc_now(), refs={"error": "total_run_cap_exceeded"})
+            await set_run_final("timeout", f"timeout({STEP_NAMES[step_idx]})")
+            return
+
         if advance_hours > 0:
             await update_step(
                 step_idx, status="running", started_at=_utc_now(), source="simulated_clock"
@@ -504,6 +613,11 @@ async def _execute_scenario_run(
         # Step 6: retry_executed
         # -------------------------------------------------------------------
         step_idx = 5
+        if time.monotonic() - run_start_time >= TOTAL_RUN_TIMEOUT_SECONDS:
+            await update_step(step_idx, status="timeout", finished_at=_utc_now(), refs={"error": "total_run_cap_exceeded"})
+            await set_run_final("timeout", f"timeout({STEP_NAMES[step_idx]})")
+            return
+
         await update_step(
             step_idx, status="running", started_at=_utc_now(), source="paypal"
         )
@@ -533,13 +647,20 @@ async def _execute_scenario_run(
         # Step 7: verified
         # -------------------------------------------------------------------
         step_idx = 6
+        if time.monotonic() - run_start_time >= TOTAL_RUN_TIMEOUT_SECONDS:
+            await update_step(step_idx, status="timeout", finished_at=_utc_now(), refs={"error": "total_run_cap_exceeded"})
+            await set_run_final("timeout", f"timeout({STEP_NAMES[step_idx]})")
+            return
+
         await update_step(
             step_idx, status="running", started_at=_utc_now(), source="paypal_webhook"
         )
         verif_doc = None
         ev = None
         start_t = time.monotonic()
-        while time.monotonic() - start_t < 120.0:
+        while time.monotonic() - start_t < STEP_TIMEOUT_SECONDS:
+            if time.monotonic() - run_start_time >= TOTAL_RUN_TIMEOUT_SECONDS:
+                break
             verif_doc = await db.verifications.find_one(
                 {"event_id": current_event_id, "assertion": "gateway_verified"}
             )
@@ -591,8 +712,51 @@ async def _execute_scenario_run(
         )
 
 
+FORBIDDEN_PUBLIC_KEYS = {
+    "vault_token_id",
+    "vault_id",
+    "email",
+    "buyer_email",
+    "card",
+    "card_digits",
+    "last_digits",
+    "card_number",
+    "payer_id",
+    "payer",
+}
+
+
+def _clean_step_refs(refs: Any) -> dict[str, Any]:
+    if not isinstance(refs, dict):
+        return {}
+    cleaned = {}
+    for k, v in refs.items():
+        k_lower = str(k).lower()
+        if k in FORBIDDEN_PUBLIC_KEYS or any(bad in k_lower for bad in ("vault", "email", "card", "payer")):
+            continue
+        cleaned[k] = v
+    return cleaned
+
+
 def _format_public_run(doc: dict[str, Any]) -> dict[str, Any]:
-    """Strip Mongo internals and ensure only public ids/amounts are returned."""
+    """Strip Mongo internals and ensure only public ids/amounts are returned.
+
+    Never exposes vault token ids, emails, card digits or payer ids.
+    """
+    clean_steps = []
+    for s in doc.get("steps", []):
+        if isinstance(s, dict):
+            clean_steps.append({
+                "name": s.get("name"),
+                "status": s.get("status"),
+                "started_at": s.get("started_at"),
+                "finished_at": s.get("finished_at"),
+                "source": s.get("source"),
+                "refs": _clean_step_refs(s.get("refs")),
+            })
+        else:
+            clean_steps.append(s)
+
     return {
         "run_id": doc.get("run_id") or str(doc.get("_id")),
         "scenario": doc.get("scenario"),
@@ -602,7 +766,7 @@ def _format_public_run(doc: dict[str, Any]) -> dict[str, Any]:
         "advance_hours": doc.get("advance_hours", 0.0),
         "status": doc.get("status"),
         "current_step": doc.get("current_step"),
-        "steps": doc.get("steps", []),
+        "steps": clean_steps,
         "final_status": doc.get("final_status"),
         "created_at": doc.get("created_at"),
         "updated_at": doc.get("updated_at"),
@@ -613,6 +777,7 @@ def _format_public_run(doc: dict[str, Any]) -> dict[str, Any]:
 async def get_demo_run(id: str) -> dict[str, Any]:
     """Public GET for a single demo run (ids and amounts only, no secrets)."""
     db = get_database()
+    await self_heal_stale_runs(db)
     query: dict[str, Any] = {"run_id": id}
     if ObjectId.is_valid(id):
         query = {"$or": [{"run_id": id}, {"_id": ObjectId(id)}]}
@@ -630,6 +795,7 @@ async def get_demo_run(id: str) -> dict[str, Any]:
 async def list_demo_runs() -> dict[str, Any]:
     """Public GET for listing recent demo runs (ids and amounts only, no secrets)."""
     db = get_database()
+    await self_heal_stale_runs(db)
     cursor = db.demo_runs.find().sort("created_at", -1).limit(50)
     runs = [
         _format_public_run(doc)

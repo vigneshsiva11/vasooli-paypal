@@ -2957,6 +2957,7 @@ def test_step11_scenario_runner_and_reset() -> None:
         _execute_scenario_run,
         get_demo_run,
         list_demo_runs,
+        self_heal_stale_runs,
         InsufficientFundsScenarioRequest,
     )
     from app.gateways.paypal import orders
@@ -3308,10 +3309,14 @@ def test_step11_scenario_runner_and_reset() -> None:
         })
 
         mock_onboard_order = {"id": "ORD-ONBOARD-NO-VAULT"}
-        # Fast-timeout simulation (patch monotonic to jump 95 seconds)
-        clock_vals = [0.0, 95.0]
+        curr_mono_9 = 0.0
+        def mock_mono_9():
+            nonlocal curr_mono_9
+            curr_mono_9 += 100.0
+            return curr_mono_9
+
         with patch("app.gateways.paypal.orders.create_and_capture_order", AsyncMock(return_value=mock_onboard_order)), \
-             patch("time.monotonic", side_effect=lambda: clock_vals.pop(0) if clock_vals else 100.0), \
+             patch("time.monotonic", side_effect=mock_mono_9), \
              patch("asyncio.sleep", AsyncMock()):
             await _execute_scenario_run(run_id=run_id_9, customer_ref="demo-no-vault", amount=49.00, advance_hours=0.0)
 
@@ -3424,13 +3429,11 @@ def test_step11_scenario_runner_and_reset() -> None:
             })
             return {"status": "completed"}
 
-        call_count_11 = 0
+        curr_monotonic_11 = 0.0
         def mock_monotonic_11():
-            nonlocal call_count_11
-            call_count_11 += 1
-            if call_count_11 >= 5:
-                return 300.0
-            return 10.0
+            nonlocal curr_monotonic_11
+            curr_monotonic_11 += 50.0
+            return curr_monotonic_11
 
         with patch("app.gateways.paypal.orders.create_and_capture_order", AsyncMock(return_value={"id": "ORD-DECL-11-11", "capture_status": "DECLINED", "processor_response_code": "5120"})), \
              patch("app.routes.demo.orchestrator_advance", side_effect=mock_advance_retry), \
@@ -3553,6 +3556,267 @@ def test_step11_scenario_runner_and_reset() -> None:
             "11.13 Public GET /demo/runs/{id} and /demo/runs expose only ids, amounts, and step statuses with zero secrets",
             no_secrets_ok,
             f"run_id={single_run_view.get('run_id')}, runs_count={len(list_runs_view.get('runs', []))}",
+        )
+
+        # -------------------------------------------------------------------
+        # 11.14 Stale-run self-heal: runs > 10m inactive marked failed(step, "stale") and lock released
+        # -------------------------------------------------------------------
+        db_11_14 = _MockMongoDB()
+        app.db._database = db_11_14
+        ten_mins_ago = datetime.now(timezone.utc) - timedelta(minutes=15)
+        db_11_14.demo_runs.docs.append({
+            "_id": ObjectId("507f1f77bcf86cd799439055"),
+            "run_id": "run_stale_11_14",
+            "status": "running",
+            "current_step": "renewal_attempt",
+            "steps": [
+                {"name": "onboard", "status": "completed", "refs": {}},
+                {"name": "renewal_attempt", "status": "running", "started_at": ten_mins_ago, "refs": {}},
+                {"name": "decline_ingested", "status": "pending", "refs": {}},
+            ],
+            "created_at": ten_mins_ago,
+            "updated_at": ten_mins_ago,
+        })
+        healed_count = await self_heal_stale_runs(db_11_14)
+        stale_run = db_11_14.demo_runs.docs[0]
+        stale_ok = (
+            healed_count == 1
+            and stale_run.get("status") == "failed"
+            and stale_run.get("final_status") == 'failed(renewal_attempt, "stale")'
+            and stale_run.get("steps", [])[1].get("status") == "failed"
+            and stale_run.get("steps", [])[1].get("refs", {}).get("error") == "stale"
+        )
+        report(
+            "11.14 Stale-run self-heal: runs > 10m without update marked failed(step, 'stale') and active-run lock released",
+            stale_ok,
+            f"healed={healed_count}, status={stale_run.get('status')}, final_status={stale_run.get('final_status')}",
+        )
+
+        # -------------------------------------------------------------------
+        # 11.15 Public GET /demo/runs and /demo/runs/{id} data sanitization: no vault tokens, emails, cards, or payer IDs
+        # -------------------------------------------------------------------
+        db_11_15 = _MockMongoDB()
+        app.db._database = db_11_15
+        run_id_15 = "run_sanitized_11_15"
+        mock_raw_completed = {
+            "_id": ObjectId("507f1f77bcf86cd799439066"),
+            "run_id": run_id_15,
+            "scenario": "insufficient-funds",
+            "customer_ref": "demo-001",
+            "amount": 49.00,
+            "currency": "USD",
+            "status": "recovered",
+            "final_status": "recovered",
+            "current_step": "verified",
+            "created_at": datetime.now(timezone.utc),
+            "updated_at": datetime.now(timezone.utc),
+            "vault_token_id": "FORBIDDEN_VAULT_TOKEN_TOP",
+            "email": "buyer_top@example.com",
+            "payer_id": "FORBIDDEN_PAYER_TOP",
+            "steps": [
+                {
+                    "name": "onboard",
+                    "status": "completed",
+                    "source": "paypal_sandbox_simulation",
+                    "refs": {
+                        "order_id": "ORD-001",
+                        "customer_ref": "demo-001",
+                        "vault_token_id": "FORBIDDEN_VAULT_TOKEN_REF",
+                        "email": "buyer@example.com",
+                        "card_digits": "1111",
+                        "payer_id": "FORBIDDEN_PAYER_REF",
+                    },
+                },
+                {
+                    "name": "verified",
+                    "status": "completed",
+                    "source": "paypal_webhook",
+                    "refs": {
+                        "event_id": "evt_001",
+                        "execution_id": "exec_001",
+                        "order_id": "ORD-002",
+                    },
+                },
+            ],
+        }
+        db_11_15.demo_runs.docs.append(mock_raw_completed)
+
+        single_run = await get_demo_run(run_id_15)
+        list_runs = await list_demo_runs()
+        single_json = json.dumps(single_run, default=str)
+        list_json = json.dumps(list_runs, default=str)
+
+        forbidden_terms = [
+            "vault_token_id",
+            "vault_id",
+            "email",
+            "buyer_email",
+            "card_digits",
+            "last_digits",
+            "card_number",
+            "payer_id",
+            "payer",
+            "FORBIDDEN_VAULT_TOKEN_TOP",
+            "buyer_top@example.com",
+            "FORBIDDEN_PAYER_TOP",
+            "FORBIDDEN_VAULT_TOKEN_REF",
+            "buyer@example.com",
+            "1111",
+            "FORBIDDEN_PAYER_REF",
+        ]
+        leaks_single = [t for t in forbidden_terms if t in single_json]
+        leaks_list = [t for t in forbidden_terms if t in list_json]
+
+        sanitization_ok = (
+            len(leaks_single) == 0
+            and len(leaks_list) == 0
+            and single_run.get("run_id") == run_id_15
+            and single_run.get("amount") == 49.00
+            and single_run.get("status") == "recovered"
+            and "ORD-001" in single_json
+            and "evt_001" in single_json
+            and "exec_001" in single_json
+        )
+        report(
+            "11.15 Public GET /demo/runs and /demo/runs/{id} sanitization: zero vault tokens, emails, cards, or payer IDs",
+            sanitization_ok,
+            f"leaks_single={leaks_single}, leaks_list={leaks_list}",
+        )
+
+        # -------------------------------------------------------------------
+        # 11.16 orders.py typed outcome: ONLY INSTRUMENT_DECLINED and TRANSACTION_REFUSED 422 return typed outcomes; others raise
+        # -------------------------------------------------------------------
+        from app.gateways.paypal.client import PayPalCallFailed
+
+        class _MockResp:
+            def __init__(self, status_code: int, data: dict):
+                self.status_code = status_code
+                self._data = data
+            def json(self):
+                return self._data
+            @property
+            def text(self):
+                return json.dumps(self._data)
+
+        class _MockClient:
+            def __init__(self, post_resp):
+                self._post_resp = post_resp
+            async def __aenter__(self):
+                return self
+            async def __aexit__(self, *args):
+                pass
+            async def post(self, *args, **kwargs):
+                return self._post_resp
+
+        # 1. 422 with INSTRUMENT_DECLINED -> typed outcome with processor_response_code=None
+        inst_decl_resp = _MockResp(422, {"details": [{"issue": "INSTRUMENT_DECLINED", "description": "declined"}]})
+        with patch("app.gateways.paypal.orders.paypal_client", return_value=_MockClient(inst_decl_resp)):
+            res_inst = await orders.create_and_capture_order(amount=49.0, card=orders.SANDBOX_TEST_VISA, db=db_11_15)
+        inst_ok = (
+            res_inst.get("status") == "COMPLETED"
+            and res_inst.get("capture_status") == "DECLINED"
+            and res_inst.get("processor_response_code") is None
+        )
+
+        # 2. 422 with TRANSACTION_REFUSED -> typed outcome with processor_response_code=None
+        tx_ref_resp = _MockResp(422, {"details": [{"issue": "TRANSACTION_REFUSED", "description": "refused"}]})
+        with patch("app.gateways.paypal.orders.paypal_client", return_value=_MockClient(tx_ref_resp)):
+            res_tx = await orders.create_and_capture_order(amount=49.0, card=orders.SANDBOX_TEST_VISA, db=db_11_15)
+        tx_ok = (
+            res_tx.get("status") == "COMPLETED"
+            and res_tx.get("capture_status") == "DECLINED"
+            and res_tx.get("processor_response_code") is None
+        )
+
+        # 3. 422 with INVALID_REQUEST -> raises PayPalCallFailed
+        inv_req_resp = _MockResp(422, {"details": [{"issue": "INVALID_REQUEST", "description": "invalid"}]})
+        raised_invalid = False
+        try:
+            with patch("app.gateways.paypal.orders.paypal_client", return_value=_MockClient(inv_req_resp)):
+                await orders.create_and_capture_order(amount=49.0, card=orders.SANDBOX_TEST_VISA, db=db_11_15)
+        except PayPalCallFailed:
+            raised_invalid = True
+
+        # 4. 400 Bad Request -> raises PayPalCallFailed
+        resp_400 = _MockResp(400, {"name": "BAD_REQUEST"})
+        raised_400 = False
+        try:
+            with patch("app.gateways.paypal.orders.paypal_client", return_value=_MockClient(resp_400)):
+                await orders.create_and_capture_order(amount=49.0, card=orders.SANDBOX_TEST_VISA, db=db_11_15)
+        except PayPalCallFailed:
+            raised_400 = True
+
+        # 5. 500 Internal Error -> raises PayPalCallFailed
+        resp_500 = _MockResp(500, {"name": "INTERNAL_SERVER_ERROR"})
+        raised_500 = False
+        try:
+            with patch("app.gateways.paypal.orders.paypal_client", return_value=_MockClient(resp_500)):
+                await orders.create_and_capture_order(amount=49.0, card=orders.SANDBOX_TEST_VISA, db=db_11_15)
+        except PayPalCallFailed:
+            raised_500 = True
+
+        typed_declines_strictly_filtered = (
+            inst_ok and tx_ok and raised_invalid and raised_400 and raised_500
+        )
+        report(
+            "11.16 orders.py typed outcome: ONLY INSTRUMENT_DECLINED and TRANSACTION_REFUSED 422 return typed outcomes with processor_response_code=None; others raise PayPalCallFailed",
+            typed_declines_strictly_filtered,
+            f"inst_ok={inst_ok}, tx_ok={tx_ok}, raised_invalid={raised_invalid}, raised_400={raised_400}, raised_500={raised_500}",
+        )
+
+        # -------------------------------------------------------------------
+        # 11.17 None processor_response_code carried through & unknown code never reaches insufficient_funds
+        # -------------------------------------------------------------------
+        from app.diagnosis.rules import classify
+        from app.models.diagnosis import PaymentRootCause
+
+        # Decline without processor_response_code yields raw_failure_reason="paypal_declined"
+        evt_none = RevenueEvent(
+            event_id="evt_decl_none_code",
+            customer_ref="demo-unmapped-01",
+            amount=49.0,
+            currency="USD",
+            surface="payment",
+            gateway="paypal",
+            raw_failure_reason="paypal_declined",
+        )
+        # Event with arbitrary unmapped PayPal code
+        evt_unmapped = RevenueEvent(
+            event_id="evt_decl_unmapped_code",
+            customer_ref="demo-unmapped-02",
+            amount=49.0,
+            currency="USD",
+            surface="payment",
+            gateway="paypal",
+            raw_failure_reason="paypal_UNKNOWN_CODE",
+        )
+        # Control event with genuine 5120 insufficient funds code
+        evt_control_5120 = RevenueEvent(
+            event_id="evt_decl_5120",
+            customer_ref="demo-control-5120",
+            amount=49.0,
+            currency="USD",
+            surface="payment",
+            gateway="paypal",
+            raw_failure_reason="paypal_5120",
+        )
+
+        match_none = classify(evt_none)
+        match_unmapped = classify(evt_unmapped)
+        match_control = classify(evt_control_5120)
+
+        unknown_never_insufficient_funds = (
+            res_inst.get("processor_response_code") is None
+            and res_tx.get("processor_response_code") is None
+            and match_none is None
+            and match_unmapped is None
+            and match_control is not None
+            and match_control.root_cause == "insufficient_funds"
+        )
+        report(
+            "11.17 processor_response_code=None carried through: unknown code routes to Gemini fallback and NEVER reaches insufficient_funds",
+            unknown_never_insufficient_funds,
+            f"inst_code={res_inst.get('processor_response_code')}, match_none={match_none}, match_unmapped={match_unmapped}, control_5120={match_control.root_cause if match_control else None}",
         )
         app.db._database = None
 

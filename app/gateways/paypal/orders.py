@@ -224,7 +224,7 @@ async def create_and_capture_order(
                 "id": req_id,
                 "status": "COMPLETED",
                 "capture_status": "DECLINED",
-                "processor_response_code": "5120",
+                "processor_response_code": None,
                 "error_details": err_json,
             })
 
@@ -277,7 +277,7 @@ async def create_and_capture_order(
                 "id": order_id,
                 "status": "COMPLETED",
                 "capture_status": "DECLINED",
-                "processor_response_code": "5120",
+                "processor_response_code": None,
                 "error_details": err_json,
             })
 
@@ -394,7 +394,7 @@ async def create_vaulted_order(
                 "id": req_id,
                 "status": "COMPLETED",
                 "capture_status": "DECLINED",
-                "processor_response_code": "5120",
+                "processor_response_code": None,
                 "error_details": err_json,
             })
 
@@ -430,7 +430,7 @@ async def create_vaulted_order(
                 "id": order_id,
                 "status": "COMPLETED",
                 "capture_status": "DECLINED",
-                "processor_response_code": "5120",
+                "processor_response_code": None,
                 "error_details": err_json,
             })
 

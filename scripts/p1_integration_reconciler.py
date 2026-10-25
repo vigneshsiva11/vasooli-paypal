@@ -21,7 +21,7 @@ import asyncio
 import json
 import os
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from bson import ObjectId
@@ -776,10 +776,38 @@ async def run_integration_check() -> int:
         assert single_run_view.get("run_id") == scenario_run_id
         assert single_run_view.get("amount") == 49.00
         assert "_id" not in single_run_view
-        print("  [PASS] Public GET /demo/runs/{id} verified on real MongoDB: clean view without internal secrets")
+        # Test stale-run self-heal on real MongoDB (vasooli_regress)
+        from app.routes.demo import self_heal_stale_runs
+        stale_run_id = f"run_stale_real_{ObjectId()}"
+        ten_mins_ago = datetime.now(timezone.utc) - timedelta(minutes=15)
+        await db.demo_runs.insert_one({
+            "run_id": stale_run_id,
+            "scenario": "insufficient-funds",
+            "customer_ref": "demo-stale-user",
+            "amount": 49.00,
+            "currency": "USD",
+            "status": "running",
+            "current_step": "renewal_attempt",
+            "steps": [
+                {"name": "onboard", "status": "completed", "refs": {}},
+                {"name": "renewal_attempt", "status": "running", "started_at": ten_mins_ago, "refs": {}},
+                {"name": "decline_ingested", "status": "pending", "refs": {}},
+            ],
+            "created_at": ten_mins_ago,
+            "updated_at": ten_mins_ago,
+        })
+        healed = await self_heal_stale_runs(db)
+        assert healed >= 1
+        healed_doc = await db.demo_runs.find_one({"run_id": stale_run_id})
+        assert healed_doc["status"] == "failed"
+        assert healed_doc["final_status"] == 'failed(renewal_attempt, "stale")'
+        # Verify active-run lock is released (no running doc for this run)
+        active_running = await db.demo_runs.find_one({"run_id": stale_run_id, "status": "running"})
+        assert active_running is None
+        print("  [PASS] Stale-run self-heal on real MongoDB (vasooli_regress): marked failed(step, 'stale') and released active lock")
 
         print("\n" + "=" * 78)
-        print("RESULT: ALL INTEGRATION CHECKS PASSED (18/18)")
+        print("RESULT: ALL INTEGRATION CHECKS PASSED (19/19)")
         print("=" * 78)
         return 0
 
