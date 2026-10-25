@@ -276,7 +276,7 @@ async def prior_retry_executions(event_id: str) -> tuple[int, datetime | None]:
             {
                 "event_id": event_id,
                 "intervention": {"$in": ["immediate_retry", "delayed_retry"]},
-                "status": {"$in": ["completed", "declined"]},
+                "status": "completed",
             },
             {"executed_at": 1},
         )

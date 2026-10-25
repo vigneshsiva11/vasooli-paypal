@@ -54,7 +54,7 @@ ActionType = Literal[
 #: accepted the request and returned a link, or the contact record was written.
 #: `failed` means it did not. `declined` means the payment rail explicitly refused the charge.
 #: Neither says anything about the customer's response, which is Stage 6's subject.
-ExecutionStatus = Literal["completed", "failed", "declined"]
+ExecutionStatus = Literal["completed", "failed"]
 
 #: Which action each executable intervention produces. The single place the
 #: mapping is declared, so the executor and the validator cannot disagree about
@@ -294,6 +294,18 @@ class ExecutionRecord(BaseModel):
     simulated_time: bool = Field(
         default=False,
         description="Whether execution was created under a simulated clock.",
+    )
+    successful: bool = Field(
+        default=True,
+        description="Whether the charge succeeded on the rail (False when capture is DECLINED).",
+    )
+    capture_status: str | None = Field(
+        default=None,
+        description="Capture status returned by the payment gateway (e.g. 'COMPLETED', 'DECLINED').",
+    )
+    processor_response_code: str | None = Field(
+        default=None,
+        description="Gateway processor response code on decline (e.g. '5120').",
     )
 
     @model_validator(mode="after")

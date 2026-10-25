@@ -391,7 +391,7 @@ async def execute(
         # releases the contact-cap slot and the cooldown anchor.
         status = "failed"
         failure_reason = str(exc)
-        fields = {"gateway": gateway}
+        fields = {"gateway": gateway, "successful": False}
         logger.warning(
             "Execution of %s for event %s failed: %s",
             intervention,

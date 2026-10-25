@@ -794,8 +794,12 @@ def test_step2_rulebook_and_policy() -> None:
         policy_verdict_version=1,
         intervention="delayed_retry",
         action_type="retry_simulated",
-        status="declined",
-        failure_reason="CCREJECT-IF: insufficient funds",
+        status="completed",
+        successful=False,
+        capture_status="DECLINED",
+        processor_response_code="5120",
+        gateway="paypal",
+        gateway_ref="ORD-DECLINED-123",
     )
     ctx_declined_retries = PolicyContext(
         customer_ref="cust_declined_cap",
@@ -809,10 +813,12 @@ def test_step2_rulebook_and_policy() -> None:
     v_declined_cap = evaluate(decision=dec_retry, context=ctx_declined_retries, currency="USD")
     report(
         "3.14 Offline check: DECLINED retry executions count toward USD retry cap (blocks with retry_cap_exceeded)",
-        exec_declined.status == "declined"
+        exec_declined.status == "completed"
+        and exec_declined.successful is False
+        and exec_declined.capture_status == "DECLINED"
         and v_declined_cap.verdict == "blocked"
         and v_declined_cap.reason == "retry_cap_exceeded",
-        f"exec_status={exec_declined.status}, verdict={v_declined_cap.verdict}, reason={v_declined_cap.reason}",
+        f"exec_status={exec_declined.status}, successful={exec_declined.successful}, verdict={v_declined_cap.verdict}, reason={v_declined_cap.reason}",
     )
 
 
@@ -1281,7 +1287,22 @@ class _MockMongoCollection:
         for doc in self.docs:
             if self._matches(doc, query):
                 if "$set" in update:
-                    doc.update(update["$set"])
+                    for k, v in update["$set"].items():
+                        if "." in k:
+                            parts = k.split(".")
+                            cur = doc
+                            for p in parts[:-1]:
+                                if p.isdigit():
+                                    cur = cur[int(p)]
+                                else:
+                                    cur = cur.setdefault(p, {})
+                            last_p = parts[-1]
+                            if last_p.isdigit():
+                                cur[int(last_p)] = v
+                            else:
+                                cur[last_p] = v
+                        else:
+                            doc[k] = v
 
                 class _UpdateRes:
                     matched_count = 1
@@ -1314,12 +1335,36 @@ class _MockMongoCollection:
 
         return _UpdateResZero()
 
+    async def drop(self) -> None:
+        self.docs.clear()
+
+    async def count_documents(self, filter: dict[str, Any] | None = None) -> int:
+        if not filter:
+            return len(self.docs)
+        return sum(1 for d in self.docs if self._matches(d, filter))
+
+    async def delete_many(self, filter: dict[str, Any] | None = None) -> Any:
+        if not filter:
+            count = len(self.docs)
+            self.docs.clear()
+            return count
+        orig_len = len(self.docs)
+        self.docs = [d for d in self.docs if not self._matches(d, filter)]
+        return orig_len - len(self.docs)
+
+    async def index_information(self) -> dict[str, Any]:
+        return {}
+
+    async def drop_index(self, *args: Any, **kwargs: Any) -> None:
+        pass
+
     async def create_index(self, *args, **kwargs) -> str:
         return "idx_mock"
 
 
 class _MockMongoDB:
-    def __init__(self):
+    def __init__(self, name: str = "vasooli_regress"):
+        self.name = name
         self.verifications = _MockMongoCollection("verifications")
         self.executions = _MockMongoCollection("executions")
         self.events = _MockMongoCollection("events")
@@ -1330,6 +1375,7 @@ class _MockMongoDB:
         self.customer_vault = _MockMongoCollection("customer_vault")
         self.paypal_events = _MockMongoCollection("paypal_events")
         self.orchestrator_runs = _MockMongoCollection("orchestrator_runs")
+        self.demo_runs = _MockMongoCollection("demo_runs")
         self.sim_clock = _MockMongoCollection("sim_clock")
 
     def __getitem__(self, name: str) -> _MockMongoCollection:
@@ -2899,6 +2945,620 @@ def test_step10_orchestrator() -> None:
     asyncio.run(run_step10_tests())
 
 
+def test_step11_scenario_runner_and_reset() -> None:
+    print("\n--- SECTION 11: DEMO RESET, SCENARIO RUNNER & PROBE CORRECTNESS ---")
+    import app.db
+    from datetime import datetime, timedelta, timezone
+    from app.config import get_settings, Settings
+    from app.routes.demo import (
+        ALLOWED_DEMO_DBS,
+        reset_demo_database,
+        run_insufficient_funds_scenario,
+        _execute_scenario_run,
+        get_demo_run,
+        list_demo_runs,
+        InsufficientFundsScenarioRequest,
+    )
+    from app.gateways.paypal import orders
+    from app.execution.port import PayPalExecutionAdapter, ExecutionResult
+    from app.policy.store import prior_retry_executions
+    from app.webhooks.paypal_reconciler import reconcile_paypal_event
+    from fastapi import HTTPException
+
+    async def run_step11_tests() -> None:
+        fixtures_live_dir = ROOT / "tests" / "fixtures" / "paypal" / "live"
+
+        # -------------------------------------------------------------------
+        # 11.1 Part 2A(a): Orders decline typed outcome & unsuccessful execution
+        # -------------------------------------------------------------------
+        mock_declined_order = {
+            "id": "ORD-DECLINED-SYNCHRONOUS",
+            "status": "COMPLETED",
+            "purchase_units": [
+                {
+                    "payments": {
+                        "captures": [
+                            {
+                                "id": "CAP-DECLINED-001",
+                                "status": "DECLINED",
+                                "processor_response": {"response_code": "5120"},
+                            }
+                        ]
+                    }
+                }
+            ],
+        }
+        enriched = orders._enrich_order_capture_info(dict(mock_declined_order))
+        enrich_ok = (
+            enriched.get("capture_status") == "DECLINED"
+            and enriched.get("processor_response_code") == "5120"
+            and enriched.get("capture_id") == "CAP-DECLINED-001"
+        )
+        report(
+            "11.1a Order helper extracts typed decline outcome (capture_status='DECLINED', code='5120') without exception",
+            enrich_ok,
+            f"capture_status={enriched.get('capture_status')}, code={enriched.get('processor_response_code')}",
+        )
+
+        adapter = PayPalExecutionAdapter()
+        mock_verdict = AuthorizedVerdict(
+            id="507f1f77bcf86cd799439011",
+            version=1,
+            event_id="pp_evt_decl_sync",
+            decision_id="507f1f77bcf86cd799439012",
+            decision_version=1,
+            verdict="authorized",
+            reason="ok",
+            checks_performed=[f"{c}: PASS (ok)" for c in POLICY_CHECKS],
+            evaluated_at=datetime.now(timezone.utc),
+            rulebook_fingerprint=RECORDED_USD_FINGERPRINT,
+            rulebook_fingerprint_source="evaluated",
+        )
+        mock_event = RevenueEvent(
+            event_id="pp_evt_decl_sync",
+            customer_ref="cust_decl_sync",
+            amount=49.00,
+            currency="USD",
+            surface="payment",
+            gateway="paypal",
+            raw_failure_reason="paypal_5120",
+        )
+        mock_decision = make_decision(
+            amount=49.00,
+            intervention="immediate_retry",
+            cost=0.0,
+            prob=0.5,
+            erv=24.5,
+        )
+
+        with patch("app.gateways.paypal.orders.create_vaulted_order", AsyncMock(return_value=enriched)):
+            exec_res = await adapter.execute_retry(
+                verdict=mock_verdict,
+                event=mock_event,
+                decision=mock_decision,
+                root_cause="insufficient_funds",
+                vault_token="vlt_test_token",
+            )
+            adapter_ok = (
+                exec_res.status == "completed"
+                and exec_res.successful is False
+                and exec_res.capture_status == "DECLINED"
+                and exec_res.processor_response_code == "5120"
+                and exec_res.gateway_ref == "ORD-DECLINED-SYNCHRONOUS"
+            )
+            report(
+                "11.1b PayPal execution adapter treats DECLINED capture as completed execution with successful=False",
+                adapter_ok,
+                f"status={exec_res.status}, successful={exec_res.successful}, capture_status={exec_res.capture_status}",
+            )
+
+        # -------------------------------------------------------------------
+        # 11.2 Part 2A(b): Decline ingestion resolves customer_ref from custom_id "cust:<ref>"
+        # -------------------------------------------------------------------
+        declined_fixture_path = fixtures_live_dir / "payment_capture_declined_order_b.json"
+        with open(declined_fixture_path, encoding="utf-8") as f:
+            declined_fixture = json.load(f)
+
+        db_11_2 = _MockMongoDB()
+        app.db._database = db_11_2
+        res_decline = await reconcile_paypal_event(declined_fixture, db_11_2)
+
+        created_event = db_11_2.events.docs[0] if db_11_2.events.docs else {}
+        decline_ingest_ok = (
+            res_decline.processed is True
+            and res_decline.matched is True
+            and created_event.get("customer_ref") == "probe1"
+            and created_event.get("status") == "at_risk"
+            and created_event.get("gateway") == "paypal"
+            and created_event.get("gateway_ref") == "2CG62440G8279605F"
+        )
+        report(
+            "11.2 Decline ingestion resolves customer_ref from resource.custom_id 'cust:probe1' (Order B live fixture)",
+            decline_ingest_ok,
+            f"customer_ref={created_event.get('customer_ref')}, event_id={created_event.get('event_id')}",
+        )
+
+        # -------------------------------------------------------------------
+        # 11.3 Part 2A(b): Completion matching uses custom_id "ev:<event_id>" plus order_id == gateway_ref
+        # -------------------------------------------------------------------
+        completed_fixture_path = fixtures_live_dir / "payment_capture_completed_order_c.json"
+        with open(completed_fixture_path, encoding="utf-8") as f:
+            completed_fixture = json.load(f)
+
+        db_11_3 = _MockMongoDB()
+        # Seed the execution that Order C retry created
+        db_11_3.executions.docs.append({
+            "_id": ObjectId("507f1f77bcf86cd799439099"),
+            "event_id": "probe_evt",
+            "gateway": "paypal",
+            "gateway_ref": "29935697HU833963D",
+            "status": "completed",
+            "successful": False,  # was initially pending/unverified
+            "amount": 5.00,
+        })
+        db_11_3.events.docs.append({
+            "event_id": "probe_evt",
+            "customer_ref": "probe1",
+            "gateway": "paypal",
+            "gateway_ref": "2CG62440G8279605F",
+            "amount": 5.00,
+            "currency": "USD",
+            "status": "at_risk",
+        })
+
+        app.db._database = db_11_3
+        res_complete = await reconcile_paypal_event(completed_fixture, db_11_3)
+        event_after = db_11_3.events.docs[0]
+        exec_after = db_11_3.executions.docs[0]
+        verif_doc = db_11_3.verifications.docs[0] if db_11_3.verifications.docs else {}
+
+        completion_match_ok = (
+            res_complete.processed is True
+            and res_complete.matched is True
+            and res_complete.outcome == "recovered"
+            and event_after.get("status") == "recovered"
+            and verif_doc.get("assertion") == GATEWAY_VERIFIED
+            and verif_doc.get("gateway_ref") == "29935697HU833963D"
+            and exec_after.get("successful") is True
+            and exec_after.get("recovery_outcome") == "recovered"
+        )
+        report(
+            "11.3 Completion matching matches by custom_id 'ev:probe_evt' + order_id == gateway_ref (Order C live fixture)",
+            completion_match_ok,
+            f"outcome={res_complete.outcome}, event_status={event_after.get('status')}, exec_succ={exec_after.get('successful')}",
+        )
+
+        # -------------------------------------------------------------------
+        # 11.4 Part 2A(c): Declined retries count towards retry cap in prior_retry_executions
+        # -------------------------------------------------------------------
+        db_11_4 = _MockMongoDB()
+        # Seed 2 completed successful and 1 completed unsuccessful (DECLINED) retries
+        now_dt = datetime.now(timezone.utc)
+        db_11_4.executions.docs.extend([
+            {
+                "event_id": "pp_cap_count_evt",
+                "intervention": "delayed_retry",
+                "status": "completed",
+                "successful": False,
+                "capture_status": "DECLINED",
+                "executed_at": now_dt - timedelta(hours=30),
+            },
+            {
+                "event_id": "pp_cap_count_evt",
+                "intervention": "immediate_retry",
+                "status": "completed",
+                "successful": False,
+                "capture_status": "DECLINED",
+                "executed_at": now_dt - timedelta(hours=26),
+            },
+        ])
+        app.db._database = db_11_4
+        with patch("app.policy.store.get_database", return_value=db_11_4):
+            count, last_at = await prior_retry_executions("pp_cap_count_evt")
+            cap_counted_ok = (count == 2 and last_at is not None)
+            report(
+                "11.4 Declined retries (status='completed', successful=False) count toward retry cap without 'declined' status",
+                cap_counted_ok,
+                f"count={count}, last_at={last_at}",
+            )
+
+        # -------------------------------------------------------------------
+        # 11.5 Part 2B: Demo Reset allowlist and non-sandbox refusal
+        # -------------------------------------------------------------------
+        db_prod = _MockMongoDB("vasooli_production")
+        db_regress = _MockMongoDB("vasooli_regress")
+        db_demo = _MockMongoDB("vasooli_demo")
+
+        # Refusal on unapproved database name
+        unapproved_refused = False
+        try:
+            with patch("app.routes.demo.get_settings", return_value=Settings(paypal_env="sandbox")):
+                await reset_demo_database(db_prod)
+        except ValueError as exc:
+            unapproved_refused = "not in allowlist" in str(exc)
+
+        # Refusal on non-sandbox PayPal environment
+        nonsandbox_refused = False
+        try:
+            with patch("app.routes.demo.get_settings", return_value=Settings(paypal_env="live")):
+                await reset_demo_database(db_regress)
+        except ValueError as exc:
+            nonsandbox_refused = "must be 'sandbox'" in str(exc)
+
+        # Success on approved databases with sandbox
+        with patch("app.routes.demo.get_settings", return_value=Settings(paypal_env="sandbox")):
+            res_reset_regress = await reset_demo_database(db_regress)
+            res_reset_demo = await reset_demo_database(db_demo)
+            reset_ok = (
+                unapproved_refused
+                and nonsandbox_refused
+                and res_reset_regress.get("status") == "ok"
+                and res_reset_demo.get("status") == "ok"
+                and len(res_reset_regress.get("dropped_collections", [])) == 12
+            )
+            report(
+                "11.5 Demo reset allowlist enforcement: refuses non-allowlist DB and non-sandbox env; resets approved collections",
+                reset_ok,
+                f"unapproved_refused={unapproved_refused}, nonsandbox_refused={nonsandbox_refused}, dropped_cols={len(res_reset_regress.get('dropped_collections', []))}",
+            )
+
+        # -------------------------------------------------------------------
+        # 11.6 Part 2C: Scenario runner validations
+        # -------------------------------------------------------------------
+        db_11_6 = _MockMongoDB()
+        app.db._database = db_11_6
+
+        # Non-sandbox refusal
+        sb_refused = False
+        try:
+            with patch("app.routes.demo.get_settings", return_value=Settings(paypal_env="production")):
+                await run_insufficient_funds_scenario(InsufficientFundsScenarioRequest())
+        except HTTPException as exc:
+            sb_refused = exc.status_code == 400
+
+        # customer_ref must start with "demo-"
+        cust_ref_refused = False
+        try:
+            with patch("app.routes.demo.get_settings", return_value=Settings(paypal_env="sandbox")):
+                await run_insufficient_funds_scenario(InsufficientFundsScenarioRequest(customer_ref="bad_ref"))
+        except HTTPException as exc:
+            cust_ref_refused = exc.status_code == 400 and "demo-" in exc.detail
+
+        # amount limits (<= 0 or > 250)
+        amt_high_refused = False
+        amt_low_refused = False
+        try:
+            with patch("app.routes.demo.get_settings", return_value=Settings(paypal_env="sandbox")):
+                await run_insufficient_funds_scenario(InsufficientFundsScenarioRequest(amount=300.00))
+        except HTTPException as exc:
+            amt_high_refused = exc.status_code == 400
+
+        try:
+            with patch("app.routes.demo.get_settings", return_value=Settings(paypal_env="sandbox")):
+                await run_insufficient_funds_scenario(InsufficientFundsScenarioRequest(amount=-5.00))
+        except HTTPException as exc:
+            amt_low_refused = exc.status_code == 400
+
+        val_ok = sb_refused and cust_ref_refused and amt_high_refused and amt_low_refused
+        report(
+            "11.6 Scenario runner input validations (sandbox check, 'demo-' prefix, 0.01-250.00 amount range)",
+            val_ok,
+            f"sandbox={sb_refused}, prefix={cust_ref_refused}, amt_high={amt_high_refused}, amt_low={amt_low_refused}",
+        )
+
+        # -------------------------------------------------------------------
+        # 11.7 Part 2C: Concurrency guard (single-active-run -> 409 Conflict)
+        # -------------------------------------------------------------------
+        db_11_7 = _MockMongoDB()
+        app.db._database = db_11_7
+        db_11_7.demo_runs.docs.append({
+            "run_id": "run_active_123",
+            "status": "running",
+            "created_at": datetime.now(timezone.utc),
+        })
+        active_refused = False
+        try:
+            with patch("app.routes.demo.get_settings", return_value=Settings(paypal_env="sandbox")):
+                await run_insufficient_funds_scenario(InsufficientFundsScenarioRequest(customer_ref="demo-concurrent"))
+        except HTTPException as exc:
+            active_refused = exc.status_code == 409
+
+        report(
+            "11.7 Concurrency guard: second active demo run rejected with 409 Conflict",
+            active_refused,
+            f"status_409={active_refused}",
+        )
+
+        # -------------------------------------------------------------------
+        # 11.8 Part 2C: Rate limit (at most 10 runs per hour -> 429 Too Many Requests)
+        # -------------------------------------------------------------------
+        db_11_8 = _MockMongoDB()
+        app.db._database = db_11_8
+        for i in range(10):
+            db_11_8.demo_runs.docs.append({
+                "run_id": f"run_past_{i}",
+                "status": "recovered",
+                "created_at": datetime.now(timezone.utc) - timedelta(minutes=5 * i),
+            })
+        rate_refused = False
+        try:
+            with patch("app.routes.demo.get_settings", return_value=Settings(paypal_env="sandbox")):
+                await run_insufficient_funds_scenario(InsufficientFundsScenarioRequest(customer_ref="demo-ratelimit"))
+        except HTTPException as exc:
+            rate_refused = exc.status_code == 429
+
+        report(
+            "11.8 Rate limit guard: 11th run in one hour rejected with 429 Too Many Requests",
+            rate_refused,
+            f"status_429={rate_refused}",
+        )
+
+        # -------------------------------------------------------------------
+        # 11.9 Part 2C: Step 1 No vault token / timeout honest failure
+        # -------------------------------------------------------------------
+        db_11_9 = _MockMongoDB()
+        app.db._database = db_11_9
+        run_id_9 = "run_timeout_onboard"
+        db_11_9.demo_runs.docs.append({
+            "run_id": run_id_9,
+            "status": "running",
+            "current_step": "onboard",
+            "steps": [{"name": "onboard", "status": "running", "refs": {}}],
+            "created_at": datetime.now(timezone.utc),
+        })
+
+        mock_onboard_order = {"id": "ORD-ONBOARD-NO-VAULT"}
+        # Fast-timeout simulation (patch monotonic to jump 95 seconds)
+        clock_vals = [0.0, 95.0]
+        with patch("app.gateways.paypal.orders.create_and_capture_order", AsyncMock(return_value=mock_onboard_order)), \
+             patch("time.monotonic", side_effect=lambda: clock_vals.pop(0) if clock_vals else 100.0), \
+             patch("asyncio.sleep", AsyncMock()):
+            await _execute_scenario_run(run_id=run_id_9, customer_ref="demo-no-vault", amount=49.00, advance_hours=0.0)
+
+        run_9_after = db_11_9.demo_runs.docs[0]
+        onboard_timeout_ok = (
+            run_9_after.get("status") == "timeout"
+            and run_9_after.get("final_status") == "timeout(onboard)"
+            and run_9_after.get("steps", [{}])[0].get("status") == "timeout"
+        )
+        report(
+            "11.9 Step 1 onboard honest timeout: missing vault webhook terminates with status='timeout' and 'timeout(onboard)'",
+            onboard_timeout_ok,
+            f"status={run_9_after.get('status')}, final_status={run_9_after.get('final_status')}",
+        )
+
+        # -------------------------------------------------------------------
+        # 11.10 Part 2C: Step 4 Blocked verdict termination
+        # -------------------------------------------------------------------
+        db_11_10 = _MockMongoDB()
+        app.db._database = db_11_10
+        run_id_10 = "run_blocked_verdict"
+        db_11_10.demo_runs.docs.append({
+            "run_id": run_id_10,
+            "status": "running",
+            "current_step": "onboard",
+            "steps": [{"name": n, "status": "pending", "refs": {}} for n in ["onboard", "renewal_attempt", "decline_ingested", "pipeline", "clock", "retry_executed", "verified"]],
+            "created_at": datetime.now(timezone.utc),
+        })
+        # Customer already has active vault token
+        db_11_10.customer_vault.docs.append({
+            "customer_ref": "demo-blocked",
+            "vault_token_id": "vlt_existing_11_10",
+            "status": "active",
+        })
+
+        mock_decline_res = {
+            "id": "ORD-DECLINED-11-10",
+            "capture_status": "DECLINED",
+            "processor_response_code": "5120",
+        }
+
+        async def mock_decline_webhook_arrival(*args, **kwargs):
+            # simulate webhook inserting at-risk event
+            db_11_10.events.docs.append({
+                "event_id": "evt_blocked_11_10",
+                "customer_ref": "demo-blocked",
+                "amount": 49.00,
+                "currency": "USD",
+                "status": "at_risk",
+                "raw_failure_reason": "paypal_5120",
+            })
+
+        async def mock_advance_blocked(*args, **kwargs):
+            # orchestrator advances and sets policy verdict to blocked
+            db_11_10.policy_verdicts.docs.append({
+                "_id": ObjectId("507f1f77bcf86cd799439055"),
+                "event_id": "evt_blocked_11_10",
+                "verdict": "blocked",
+                "reason": "customer_opted_out",
+                "version": 1,
+            })
+            return {"status": "stopped", "verdict": "blocked"}
+
+        with patch("app.gateways.paypal.orders.create_and_capture_order", AsyncMock(side_effect=[mock_decline_res])), \
+             patch("app.routes.demo.orchestrator_advance", side_effect=mock_advance_blocked):
+            await mock_decline_webhook_arrival()
+            await _execute_scenario_run(run_id=run_id_10, customer_ref="demo-blocked", amount=49.00, advance_hours=0.0)
+
+        run_10_after = db_11_10.demo_runs.docs[0]
+        blocked_ok = (
+            run_10_after.get("status") == "blocked"
+            and run_10_after.get("final_status") == "blocked (verdict)"
+            and run_10_after.get("steps", [])[3].get("name") == "pipeline"
+            and run_10_after.get("steps", [])[3].get("status") == "completed"
+        )
+        report(
+            "11.10 Step 4 pipeline terminal status: blocked policy verdict terminates run with status='blocked' ('blocked (verdict)')",
+            blocked_ok,
+            f"status={run_10_after.get('status')}, final_status={run_10_after.get('final_status')}",
+        )
+
+        # -------------------------------------------------------------------
+        # 11.11 Part 2C: Step 7 Verified honest timeout
+        # -------------------------------------------------------------------
+        db_11_11 = _MockMongoDB()
+        app.db._database = db_11_11
+        run_id_11 = "run_timeout_verified"
+        db_11_11.demo_runs.docs.append({
+            "run_id": run_id_11,
+            "status": "running",
+            "current_step": "onboard",
+            "steps": [{"name": n, "status": "pending", "refs": {}} for n in ["onboard", "renewal_attempt", "decline_ingested", "pipeline", "clock", "retry_executed", "verified"]],
+            "created_at": datetime.now(timezone.utc),
+        })
+        db_11_11.customer_vault.docs.append({
+            "customer_ref": "demo-timeout-verif",
+            "vault_token_id": "vlt_token_11_11",
+            "status": "active",
+        })
+
+        async def mock_advance_retry(*args, **kwargs):
+            # pipeline creates retry execution
+            db_11_11.executions.docs.append({
+                "_id": ObjectId("507f1f77bcf86cd799439077"),
+                "event_id": "evt_timeout_11_11",
+                "gateway": "paypal",
+                "gateway_ref": "ORD-RETRY-11-11",
+                "status": "completed",
+                "successful": True,
+            })
+            return {"status": "completed"}
+
+        call_count_11 = 0
+        def mock_monotonic_11():
+            nonlocal call_count_11
+            call_count_11 += 1
+            if call_count_11 >= 5:
+                return 300.0
+            return 10.0
+
+        with patch("app.gateways.paypal.orders.create_and_capture_order", AsyncMock(return_value={"id": "ORD-DECL-11-11", "capture_status": "DECLINED", "processor_response_code": "5120"})), \
+             patch("app.routes.demo.orchestrator_advance", side_effect=mock_advance_retry), \
+             patch("time.monotonic", side_effect=mock_monotonic_11), \
+             patch("asyncio.sleep", AsyncMock()):
+            # Insert at-risk event directly
+            db_11_11.events.docs.append({
+                "event_id": "evt_timeout_11_11",
+                "customer_ref": "demo-timeout-verif",
+                "amount": 49.00,
+                "currency": "USD",
+                "status": "at_risk",
+                "raw_failure_reason": "paypal_5120",
+            })
+            await _execute_scenario_run(run_id=run_id_11, customer_ref="demo-timeout-verif", amount=49.00, advance_hours=0.0)
+
+        run_11_after = db_11_11.demo_runs.docs[0]
+        verif_timeout_ok = (
+            run_11_after.get("status") == "timeout"
+            and run_11_after.get("final_status") == "timeout(verified)"
+            and run_11_after.get("steps", [])[6].get("status") == "timeout"
+        )
+        report(
+            "11.11 Step 7 verified honest timeout: missing completion webhook terminates honestly with 'timeout(verified)'",
+            verif_timeout_ok,
+            f"status={run_11_after.get('status')}, final_status={run_11_after.get('final_status')}",
+        )
+
+        # -------------------------------------------------------------------
+        # 11.12 Part 2C: Full happy path scenario run & public GET inspection
+        # -------------------------------------------------------------------
+        db_11_12 = _MockMongoDB()
+        app.db._database = db_11_12
+        run_id_12 = "run_happy_path_12"
+        db_11_12.demo_runs.docs.append({
+            "run_id": run_id_12,
+            "scenario": "insufficient-funds",
+            "customer_ref": "demo-happy",
+            "amount": 49.00,
+            "currency": "USD",
+            "advance_hours": 24.0,
+            "status": "running",
+            "current_step": "onboard",
+            "steps": [{"name": n, "status": "pending", "refs": {}} for n in ["onboard", "renewal_attempt", "decline_ingested", "pipeline", "clock", "retry_executed", "verified"]],
+            "created_at": datetime.now(timezone.utc),
+            "updated_at": datetime.now(timezone.utc),
+        })
+        db_11_12.customer_vault.docs.append({
+            "customer_ref": "demo-happy",
+            "vault_token_id": "vlt_token_happy",
+            "status": "active",
+        })
+
+        async def happy_advance(*args, **kwargs):
+            # pipeline creates retry execution
+            db_11_12.executions.docs.append({
+                "_id": ObjectId("507f1f77bcf86cd799439088"),
+                "event_id": "evt_happy_12",
+                "gateway": "paypal",
+                "gateway_ref": "ORD-RETRY-HAPPY",
+                "status": "completed",
+                "successful": True,
+            })
+            return {"status": "completed"}
+
+        # Simulate completion webhook reconciliation happening during step 7
+        async def mock_sleep_step7(delay: float):
+            db_11_12.verifications.docs.append({
+                "_id": ObjectId("507f1f77bcf86cd799439099"),
+                "event_id": "evt_happy_12",
+                "assertion": "gateway_verified",
+                "outcome": "recovered",
+            })
+            # Transition event to recovered
+            for ev in db_11_12.events.docs:
+                if ev.get("event_id") == "evt_happy_12":
+                    ev["status"] = "recovered"
+
+        with patch("app.gateways.paypal.orders.create_and_capture_order", AsyncMock(return_value={"id": "ORD-DECL-HAPPY", "capture_status": "DECLINED", "processor_response_code": "5120"})), \
+             patch("app.routes.demo.orchestrator_advance", side_effect=happy_advance), \
+             patch("app.clock.advance_mongo_clock", AsyncMock()), \
+             patch("asyncio.sleep", side_effect=mock_sleep_step7):
+            # Seed at-risk event from renewal decline
+            db_11_12.events.docs.append({
+                "event_id": "evt_happy_12",
+                "customer_ref": "demo-happy",
+                "amount": 49.00,
+                "currency": "USD",
+                "status": "at_risk",
+                "raw_failure_reason": "paypal_5120",
+            })
+            await _execute_scenario_run(run_id=run_id_12, customer_ref="demo-happy", amount=49.00, advance_hours=24.0)
+
+        run_12_after = db_11_12.demo_runs.docs[0]
+        happy_path_ok = (
+            run_12_after.get("status") == "recovered"
+            and run_12_after.get("final_status") == "recovered"
+            and all(s.get("status") == "completed" for s in run_12_after.get("steps", []))
+        )
+        report(
+            "11.12 Full happy path scenario run: all 7 steps complete, event transitions to 'recovered'",
+            happy_path_ok,
+            f"status={run_12_after.get('status')}, steps={[s.get('name')+':'+s.get('status') for s in run_12_after.get('steps', [])]}",
+        )
+
+        # Public GET endpoints (verify zero secrets exposed)
+        single_run_view = await get_demo_run(run_id_12)
+        list_runs_view = await list_demo_runs()
+        serialized_view = json.dumps(single_run_view, default=str)
+        no_secrets_ok = (
+            single_run_view.get("run_id") == run_id_12
+            and single_run_view.get("amount") == 49.00
+            and len(list_runs_view.get("runs", [])) >= 1
+            and "_id" not in single_run_view
+            and "client_secret" not in serialized_view.lower()
+            and "password" not in serialized_view.lower()
+            and "private" not in serialized_view.lower()
+        )
+        report(
+            "11.13 Public GET /demo/runs/{id} and /demo/runs expose only ids, amounts, and step statuses with zero secrets",
+            no_secrets_ok,
+            f"run_id={single_run_view.get('run_id')}, runs_count={len(list_runs_view.get('runs', []))}",
+        )
+        app.db._database = None
+
+    asyncio.run(run_step11_tests())
+
+
 def main() -> int:
     print("=" * 78)
     print("PHASE 1 CONTRACT CHECKS (OFFLINE — NO NETWORK, NO DB, NO SERVER)")
@@ -2914,6 +3574,7 @@ def main() -> int:
     test_step8_settings_cors_origins()
     test_step9_paypal_capture_declined_and_vault()
     test_step10_orchestrator()
+    test_step11_scenario_runner_and_reset()
 
     print("\n" + "=" * 78)
     print(f"SUMMARY: {PASS_COUNT} PASSED, {FAIL_COUNT} FAILED")

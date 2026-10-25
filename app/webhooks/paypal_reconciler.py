@@ -460,10 +460,22 @@ async def reconcile_paypal_event(
             event_id = custom_id[3:]
 
         exec_query: dict[str, Any] = {"gateway": "paypal"}
-        if order_id:
+        if order_id and event_id:
             exec_query["gateway_ref"] = order_id
-        if event_id:
             exec_query["event_id"] = event_id
+        elif order_id:
+            exec_query["gateway_ref"] = order_id
+        elif event_id:
+            exec_query["event_id"] = event_id
+        else:
+            return PayPalReconcileResult(
+                processed=False,
+                matched=False,
+                duplicate=False,
+                detail="Missing order_id and event_id for capture completion matching",
+                paypal_event_id=paypal_event_id,
+                event_type=event_type,
+            )
 
         execution = await db.executions.find_one(exec_query)
         if not execution:
@@ -521,6 +533,10 @@ async def reconcile_paypal_event(
                 event_status=await _get_event_status(execution["event_id"], db),
             )
 
+        await db.executions.update_one(
+            {"_id": execution["_id"]},
+            {"$set": {"successful": True, "recovery_outcome": "recovered"}},
+        )
         await _transition_event_status(execution["event_id"], "recovered", db)
         logger.info(
             "Reconciled PAYMENT.CAPTURE.COMPLETED %s for event %s (execution %s, amount %.2f)",

@@ -41,3 +41,7 @@ Baseline: the original Vasooli repository at tag `razorpay-buildathon-submission
 - Four Razorpay-dependent gate scripts (s5, s6, s6b, s8) are not run in this repository to protect the Razorpay test account's quota; the Razorpay path is covered by offline characterization checks instead. `s7_verify` reports two expected failures that depend on those gates.
 - Some gate scripts were edited to support admin tokens and extra fixtures (`s3`, `s4`, `s7`, `s9`); each edit is recorded in `docs/regression/baseline.md`.
 '@ | Set-Content WHAT_CHANGED.md -Encoding utf8
+## 2026-10-25: Step 5c (scenario runner)
+- Server-side scenario runner (insufficient-funds): onboard with a vaulted card, a sandbox-simulated decline, orchestrated retry on the vaulted card, verified by a signed webhook; every step is labelled with its source.
+- Demo reset restricted to an allowlist and the sandbox; declined recovery attempts are typed outcomes, never exceptions.
+- Live sandbox probe confirmed custom_id appears in decline and completion webhooks; fixtures saved with hashes.

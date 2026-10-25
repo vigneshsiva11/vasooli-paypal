@@ -38,6 +38,9 @@ class ExecutionResult:
     """The outcome produced by an execution adapter."""
 
     status: str = "completed"
+    successful: bool = True
+    capture_status: str | None = None
+    processor_response_code: str | None = None
     gateway: str = "razorpay"
     gateway_ref: str | None = None
     gateway_url: str | None = None
@@ -49,6 +52,9 @@ class ExecutionResult:
         """Convert result fields to ExecutionRecord field mapping."""
         fields: dict[str, Any] = {
             "gateway": self.gateway,
+            "successful": self.successful,
+            "capture_status": self.capture_status,
+            "processor_response_code": self.processor_response_code,
         }
         if self.gateway == "razorpay":
             fields["razorpay_payment_link_id"] = self.razorpay_payment_link_id
@@ -245,8 +251,19 @@ class PayPalExecutionAdapter(ExecutionPort):
             if link.get("rel") in ("self", "approve"):
                 url = link.get("href")
                 break
+
+        capture_details = orders.extract_capture_details(captured)
+        capture_status = captured.get("capture_status") or capture_details.get("capture_status")
+        processor_response_code = captured.get("processor_response_code") or capture_details.get("processor_response_code")
+        successful = True
+        if capture_status == "DECLINED":
+            successful = False
+
         return ExecutionResult(
             status="completed",
+            successful=successful,
+            capture_status=capture_status,
+            processor_response_code=processor_response_code,
             gateway="paypal",
             gateway_ref=order_id,
             gateway_url=url,

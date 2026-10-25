@@ -28,6 +28,7 @@ from app.ptp import ensure_extraction_indexes
 from app.ptp import ensure_indexes as ensure_promise_indexes
 from app.routes import (
     decisions,
+    demo,
     diagnoses,
     events,
     executions,
@@ -126,6 +127,8 @@ app.include_router(metrics.router)
 # Orchestrator & Simulation routers
 app.include_router(orchestrator.router)
 app.include_router(sim.router)
+# Demo reset & scenarios
+app.include_router(demo.router)
 
 
 @app.get("/", tags=["health"])

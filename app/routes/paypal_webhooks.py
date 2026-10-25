@@ -76,17 +76,24 @@ async def _safe_orchestrate(event_id: str) -> None:
 _index_ensured: bool = False
 
 
+async def ensure_paypal_event_indexes(db: Any = None) -> None:
+    """Ensure unique index on paypal_events collection."""
+    database = db if db is not None else get_database()
+    col = database[PAYPAL_EVENTS_COLLECTION]
+    await col.create_index(
+        [("paypal_event_id", ASCENDING)],
+        unique=True,
+        name="uniq_paypal_event_id",
+    )
+
+
 async def _collection() -> AsyncIOMotorCollection:
     """Return the paypal_events collection, ensuring the unique index exists."""
     global _index_ensured
     db = get_database()
     col = db[PAYPAL_EVENTS_COLLECTION]
     if not _index_ensured:
-        await col.create_index(
-            [("paypal_event_id", ASCENDING)],
-            unique=True,
-            name="uniq_paypal_event_id",
-        )
+        await ensure_paypal_event_indexes(db)
         _index_ensured = True
     return col
 

@@ -82,6 +82,11 @@ class Settings(BaseSettings):
     paypal_webhook_id: str = ""
     paypal_buyer_email: str = ""
 
+    @property
+    def paypal_environment(self) -> str:
+        return self.paypal_env
+
+
 
 @lru_cache
 def get_settings() -> Settings:

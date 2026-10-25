@@ -101,6 +101,42 @@ def _card_payment_source(
     return {"card": card_block}
 
 
+def extract_capture_details(data: dict[str, Any]) -> dict[str, Any]:
+    """Extract capture_status, processor_response_code, and capture_id from an order or capture."""
+    for unit in data.get("purchase_units", []):
+        for cap in unit.get("payments", {}).get("captures", []):
+            code = cap.get("processor_response", {}).get("response_code")
+            return {
+                "capture_id": cap.get("id"),
+                "capture_status": cap.get("status"),
+                "processor_response_code": code,
+            }
+    if "processor_response" in data or data.get("resource_type") == "capture":
+        code = data.get("processor_response", {}).get("response_code")
+        return {
+            "capture_id": data.get("id"),
+            "capture_status": data.get("status"),
+            "processor_response_code": code,
+        }
+    return {
+        "capture_id": data.get("capture_id"),
+        "capture_status": data.get("capture_status"),
+        "processor_response_code": data.get("processor_response_code"),
+    }
+
+
+def _enrich_order_capture_info(data: dict[str, Any]) -> dict[str, Any]:
+    """Ensure capture_status, processor_response_code, and capture_id are accessible at root."""
+    details = extract_capture_details(data)
+    if details["capture_id"] and "capture_id" not in data:
+        data["capture_id"] = details["capture_id"]
+    if details["capture_status"] and "capture_status" not in data:
+        data["capture_status"] = details["capture_status"]
+    if details["processor_response_code"] and "processor_response_code" not in data:
+        data["processor_response_code"] = details["processor_response_code"]
+    return data
+
+
 async def create_and_capture_order(
     *,
     amount: float,
@@ -140,7 +176,7 @@ async def create_and_capture_order(
         The full capture response body from PayPal.
 
     Raises:
-        PayPalCallFailed: on HTTP error at either step.
+        PayPalCallFailed: on HTTP error at either step (excluding declines).
     """
     req_id = idempotency_key or str(uuid.uuid4())
     ref = reference_id or req_id
@@ -176,6 +212,22 @@ async def create_and_capture_order(
             headers={"PayPal-Request-Id": req_id},
         )
 
+    if create_resp.status_code == 422:
+        err_json = {}
+        try:
+            err_json = create_resp.json()
+        except Exception:
+            pass
+        issues = [d.get("issue") for d in err_json.get("details", []) if isinstance(d, dict)]
+        if any(issue in ("INSTRUMENT_DECLINED", "TRANSACTION_REFUSED") for issue in issues):
+            return _enrich_order_capture_info({
+                "id": req_id,
+                "status": "COMPLETED",
+                "capture_status": "DECLINED",
+                "processor_response_code": "5120",
+                "error_details": err_json,
+            })
+
     if create_resp.status_code not in (200, 201):
         raise PayPalCallFailed(
             f"create_order failed: {describe_error(create_resp)}"
@@ -203,7 +255,7 @@ async def create_and_capture_order(
 
     # If the order was already COMPLETED (e.g. sandbox auto-capture), return it.
     if order_status == "COMPLETED":
-        return order
+        return _enrich_order_capture_info(order)
 
     # Otherwise, capture.
     async with paypal_client() as client:
@@ -212,6 +264,22 @@ async def create_and_capture_order(
             json={},
             headers={"PayPal-Request-Id": f"{req_id}-capture"},
         )
+
+    if capture_resp.status_code == 422:
+        err_json = {}
+        try:
+            err_json = capture_resp.json()
+        except Exception:
+            pass
+        issues = [d.get("issue") for d in err_json.get("details", []) if isinstance(d, dict)]
+        if any(issue in ("INSTRUMENT_DECLINED", "TRANSACTION_REFUSED") for issue in issues):
+            return _enrich_order_capture_info({
+                "id": order_id,
+                "status": "COMPLETED",
+                "capture_status": "DECLINED",
+                "processor_response_code": "5120",
+                "error_details": err_json,
+            })
 
     if capture_resp.status_code not in (200, 201):
         raise PayPalCallFailed(
@@ -224,7 +292,7 @@ async def create_and_capture_order(
         order_id,
         captured.get("status"),
     )
-    return captured
+    return _enrich_order_capture_info(captured)
 
 
 def _extract_vault_id(capture_response: dict[str, Any]) -> str | None:
@@ -314,6 +382,22 @@ async def create_vaulted_order(
             headers={"PayPal-Request-Id": req_id},
         )
 
+    if create_resp.status_code == 422:
+        err_json = {}
+        try:
+            err_json = create_resp.json()
+        except Exception:
+            pass
+        issues = [d.get("issue") for d in err_json.get("details", []) if isinstance(d, dict)]
+        if any(issue in ("INSTRUMENT_DECLINED", "TRANSACTION_REFUSED") for issue in issues):
+            return _enrich_order_capture_info({
+                "id": req_id,
+                "status": "COMPLETED",
+                "capture_status": "DECLINED",
+                "processor_response_code": "5120",
+                "error_details": err_json,
+            })
+
     if create_resp.status_code not in (200, 201):
         raise PayPalCallFailed(
             f"create_vaulted_order failed: {describe_error(create_resp)}"
@@ -325,7 +409,7 @@ async def create_vaulted_order(
     logger.info("Created vaulted order %s status=%s", order_id, order_status)
 
     if order_status == "COMPLETED":
-        return order
+        return _enrich_order_capture_info(order)
 
     async with paypal_client() as client:
         capture_resp = await client.post(
@@ -333,6 +417,22 @@ async def create_vaulted_order(
             json={},
             headers={"PayPal-Request-Id": f"{req_id}-capture"},
         )
+
+    if capture_resp.status_code == 422:
+        err_json = {}
+        try:
+            err_json = capture_resp.json()
+        except Exception:
+            pass
+        issues = [d.get("issue") for d in err_json.get("details", []) if isinstance(d, dict)]
+        if any(issue in ("INSTRUMENT_DECLINED", "TRANSACTION_REFUSED") for issue in issues):
+            return _enrich_order_capture_info({
+                "id": order_id,
+                "status": "COMPLETED",
+                "capture_status": "DECLINED",
+                "processor_response_code": "5120",
+                "error_details": err_json,
+            })
 
     if capture_resp.status_code not in (200, 201):
         raise PayPalCallFailed(
@@ -343,7 +443,7 @@ async def create_vaulted_order(
     logger.info(
         "Captured vaulted order %s status=%s", order_id, captured.get("status")
     )
-    return captured
+    return _enrich_order_capture_info(captured)
 
 
 __all__ = [

@@ -640,16 +640,18 @@ async def run_integration_check() -> int:
         assert v_c.verdict == "authorized"
         assert v_c.reason == "ok"
 
-        # Case D: 3 retries where executions have status="declined" count toward retry cap
+        # Case D: 3 retries where executions are declined (status="completed", successful=False, capture_status="DECLINED") count toward retry cap
         await db.executions.delete_many({"event_id": usd_event_id})
         for i in range(3):
-            st = "declined" if i % 2 == 0 else "completed"
             await db.executions.insert_one({
                 "execution_id": f"exec_declined_cap_{i}",
                 "event_id": usd_event_id,
                 "policy_verdict_id": str(ObjectId()),
                 "intervention": "delayed_retry",
-                "status": st,
+                "status": "completed",
+                "successful": False,
+                "capture_status": "DECLINED",
+                "processor_response_code": "5120",
                 "executed_at": now_sim - timedelta(hours=30 + i * 24),
                 "created_at": now_sim - timedelta(hours=30 + i * 24),
             })
@@ -661,10 +663,123 @@ async def run_integration_check() -> int:
         assert v_d.reason == "retry_cap_exceeded"
         assert "retry cap reached: 3 prior retry executions" in v_d.checks_performed[0]
 
-        print("  [PASS] USD Retry Cap integration check: 3 retries capped (including 'declined'), 24h cooldown enforced, real MongoDB queries verified")
+        print("  [PASS] USD Retry Cap integration check: 3 retries capped (including 'declined' retries with status='completed', successful=False), 24h cooldown enforced, real MongoDB queries verified")
+
+        # -------------------------------------------------------------------
+        # 17. Demo Reset & Scenario Runner Integration Checks (vasooli_regress)
+        # -------------------------------------------------------------------
+        from app.routes.demo import (
+            reset_demo_database,
+            _execute_scenario_run,
+            get_demo_run,
+            list_demo_runs,
+        )
+        app.db._database = db
+
+        # Test reset_demo_database against vasooli_regress
+        reset_res = await reset_demo_database(target_db)
+        assert reset_res.get("status") == "ok"
+        assert len(reset_res.get("dropped_collections", [])) == 12
+        print("  [PASS] Demo reset on real MongoDB (vasooli_regress): dropped and re-ensured 12 collections")
+
+        # Test scenario runner background task on real MongoDB
+        scenario_run_id = str(ObjectId())
+        scenario_steps = [
+            {"name": name, "status": "pending", "started_at": None, "finished_at": None, "source": None, "refs": {}}
+            for name in ["onboard", "renewal_attempt", "decline_ingested", "pipeline", "clock", "retry_executed", "verified"]
+        ]
+        await db.demo_runs.insert_one({
+            "_id": ObjectId(scenario_run_id),
+            "run_id": scenario_run_id,
+            "scenario": "insufficient-funds",
+            "customer_ref": "demo-integ-test",
+            "amount": 49.00,
+            "currency": "USD",
+            "advance_hours": 25.0,
+            "status": "running",
+            "current_step": "onboard",
+            "steps": scenario_steps,
+            "final_status": None,
+            "created_at": datetime.now(timezone.utc),
+            "updated_at": datetime.now(timezone.utc),
+        })
+
+        # Mock adapter responses and feeds for scenario runner steps
+        mock_card_order = {"id": "ORD-DEMO-CARD-001", "status": "COMPLETED", "capture_status": "COMPLETED"}
+        mock_decline_order = {
+            "id": "ORD-DEMO-DECLINE-002",
+            "status": "COMPLETED",
+            "capture_status": "DECLINED",
+            "processor_response_code": "5120",
+        }
+        mock_vault_order = {"id": "ORD-DEMO-VAULT-003", "status": "COMPLETED", "capture_status": "COMPLETED"}
+
+        with patch("app.gateways.paypal.orders.create_and_capture_order", side_effect=[mock_card_order, mock_decline_order]), \
+             patch("app.gateways.paypal.orders.create_vaulted_order", return_value=mock_vault_order):
+
+            # Helper background feeder for vault token, decline webhook, and completion webhook
+            async def feed_webhooks_for_run():
+                await asyncio.sleep(0.05)
+                # Feed step 1 vault token
+                await db.customer_vault.insert_one({
+                    "customer_ref": "demo-integ-test",
+                    "vault_id": "tok_demo_integ_123",
+                    "payment_source": "card",
+                    "card_brand": "VISA",
+                    "card_last_digits": "1111",
+                    "status": "active",
+                    "created_at": datetime.now(timezone.utc),
+                })
+                await asyncio.sleep(0.05)
+                # Feed step 3 decline webhook
+                with open(FIXTURES_DIR / "live" / "payment_capture_declined_order_b.json", "r", encoding="utf-8") as f:
+                    decline_fx = json.load(f)
+                decline_fx["resource"]["custom_id"] = "cust:demo-integ-test"
+                decline_fx["resource"]["amount"]["value"] = "49.00"
+                decline_fx["id"] = f"WH-DEMO-DECLINE-{ObjectId()}"
+                await reconcile_paypal_event(decline_fx)
+
+                # Feed step 7 completion webhook after retry execution is recorded
+                retry_exec = None
+                for _ in range(50):
+                    retry_exec = await db.executions.find_one({"gateway_ref": "ORD-DEMO-VAULT-003"})
+                    if retry_exec:
+                        break
+                    await asyncio.sleep(0.05)
+
+                with open(FIXTURES_DIR / "live" / "payment_capture_completed_order_c.json", "r", encoding="utf-8") as f:
+                    comp_fx = json.load(f)
+                comp_fx["id"] = f"WH-DEMO-COMP-{ObjectId()}"
+                comp_fx["resource"]["custom_id"] = f"ev:{retry_exec['event_id']}" if retry_exec else "cust:demo-integ-test"
+                comp_fx["resource"]["amount"]["value"] = "49.00"
+                comp_fx["resource"]["supplementary_data"] = {"related_ids": {"order_id": "ORD-DEMO-VAULT-003"}}
+                await reconcile_paypal_event(comp_fx)
+
+            feeder_task = asyncio.create_task(feed_webhooks_for_run())
+            await _execute_scenario_run(
+                run_id=scenario_run_id,
+                customer_ref="demo-integ-test",
+                amount=49.00,
+                advance_hours=25.0,
+            )
+            await feeder_task
+
+        run_doc_after = await db.demo_runs.find_one({"run_id": scenario_run_id})
+        assert run_doc_after is not None
+        assert run_doc_after.get("status") == "recovered", f"Expected recovered, got {run_doc_after.get('status')}"
+        assert run_doc_after.get("final_status") == "recovered"
+        assert all(s.get("status") == "completed" for s in run_doc_after.get("steps", []))
+        print("  [PASS] Scenario runner on real MongoDB (vasooli_regress): all 7 steps completed, event recovered")
+
+        # Test public GET formatting
+        single_run_view = await get_demo_run(scenario_run_id)
+        assert single_run_view.get("run_id") == scenario_run_id
+        assert single_run_view.get("amount") == 49.00
+        assert "_id" not in single_run_view
+        print("  [PASS] Public GET /demo/runs/{id} verified on real MongoDB: clean view without internal secrets")
 
         print("\n" + "=" * 78)
-        print("RESULT: ALL INTEGRATION CHECKS PASSED (16/16)")
+        print("RESULT: ALL INTEGRATION CHECKS PASSED (18/18)")
         print("=" * 78)
         return 0
 
