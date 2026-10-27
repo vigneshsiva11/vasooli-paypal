@@ -32,6 +32,7 @@ from app.routes import (
     diagnoses,
     events,
     executions,
+    ledger,
     metrics,
     orchestrator,
     paypal_webhooks,
@@ -85,6 +86,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             # `app/ptp/extraction_store.py` for why an extraction attempt is not a
             # fact that can only be true once.
             await ensure_extraction_indexes()
+            await demo.ensure_demo_run_indexes()
         except Exception:  # noqa: BLE001 - reported separately from connection failure
             logger.exception(
                 "Failed to ensure MongoDB indexes; uniqueness is NOT enforced"
@@ -136,6 +138,7 @@ app.include_router(promises.router)
 # Stage 7. Read-only: this router declares GET routes and nothing else, and calls
 # no index-ensuring function above because it creates no collection of its own.
 app.include_router(metrics.router)
+app.include_router(ledger.router)
 # Orchestrator & Simulation routers
 app.include_router(orchestrator.router)
 app.include_router(sim.router)

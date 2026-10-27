@@ -121,3 +121,21 @@ async def reset_mongo_clock(db: Any = None) -> MongoClock:
         upsert=True,
     )
     return await MongoClock.load(database)
+
+
+async def set_mongo_clock_offset(offset_seconds: float, db: Any = None) -> MongoClock:
+    database = db if db is not None else get_database()
+    is_active = abs(offset_seconds) > 0.001
+    await database["sim_clock"].update_one(
+        {"_id": "default"},
+        {
+            "$set": {
+                "offset_seconds": float(offset_seconds),
+                "is_active": is_active,
+                "updated_at": _utc_now(),
+            }
+        },
+        upsert=True,
+    )
+    return await MongoClock.load(database)
+

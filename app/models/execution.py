@@ -448,5 +448,9 @@ class ExecutionRecordDocument(ExecutionRecord):
     @classmethod
     def from_document(cls, document: dict[str, Any]) -> "ExecutionRecordDocument":
         """Build a record from a raw MongoDB document."""
+        from app.sanitizer import mask_invoice_payer_url
+
         fields = {key: value for key, value in document.items() if key != "_id"}
+        if "gateway_url" in fields and fields["gateway_url"]:
+            fields["gateway_url"] = mask_invoice_payer_url(fields["gateway_url"])
         return cls(id=str(document["_id"]), **fields)

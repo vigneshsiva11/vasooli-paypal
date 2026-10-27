@@ -49,3 +49,8 @@ Baseline: the original Vasooli repository at tag `razorpay-buildathon-submission
 ## 2026-10-26: First live run and production guard
 - Hosted run completed on the sandbox: card onboarding vaulted, a simulated decline (5120), an orchestrated retry on the vaulted card, and a signed PAYMENT.CAPTURE.COMPLETED webhook marking the event recovered. Evidence: docs/evidence/live-run-2026-10-25.json.
 - Production startup now refuses to run without the demo guard and an admin token; privileged routes check the token independently.
+
+## 2026-10-26: Public surface
+- Public GET responses sanitized (vault ids, emails, card data, payer ids, raw payloads removed); invoice payer URLs masked.
+- Added a sanitized /ledger endpoint whose totals match /metrics/summary.
+- Added a rate-limited, sandbox-only public run endpoint (off by default) with an exact-path guard exemption and an atomic one-active-run lock proven on real MongoDB.

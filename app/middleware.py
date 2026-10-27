@@ -59,28 +59,47 @@ class PublicDemoMiddleware(BaseHTTPMiddleware):
         if request.method == "POST" and path == "/webhooks/paypal":
             return await call_next(request)
 
+        # Exact-path allowlist for public demo run route (and nothing else)
+        if request.method == "POST" and path == "/demo/public/run":
+            return await call_next(request)
+
         # Fail closed if admin_token is empty
         expected_token = (current_settings.admin_token or "").strip()
         if not expected_token:
             logger.warning("Public demo mode write rejected: admin_token not configured (503 fail-closed)")
+            detail = (
+                "Promise extraction write operations are disabled in public demo mode"
+                if path == "/promises/from-text"
+                else "Service unavailable: write operations disabled in public demo mode"
+            )
             return JSONResponse(
                 status_code=503,
-                content={"detail": "Service unavailable: write operations disabled in public demo mode"},
+                content={"detail": detail, "code": "write_disabled_in_demo"},
             )
 
         token = request.headers.get("X-Admin-Token")
         if not token:
             logger.warning("Public demo mode write rejected: missing X-Admin-Token header (401)")
+            detail = (
+                "Extracting commitments from customer text requires an admin token in public demo mode."
+                if path == "/promises/from-text"
+                else "Unauthorized: X-Admin-Token header required"
+            )
             return JSONResponse(
                 status_code=401,
-                content={"detail": "Unauthorized: X-Admin-Token header required"},
+                content={"detail": detail, "code": "admin_token_required"},
             )
 
         if not hmac.compare_digest(token.encode("utf-8"), expected_token.encode("utf-8")):
             logger.warning("Public demo mode write rejected: invalid X-Admin-Token header (401)")
+            detail = (
+                "Invalid admin token: extracting commitments from customer text requires a valid admin token."
+                if path == "/promises/from-text"
+                else "Unauthorized: invalid X-Admin-Token"
+            )
             return JSONResponse(
                 status_code=401,
-                content={"detail": "Unauthorized: invalid X-Admin-Token"},
+                content={"detail": detail, "code": "invalid_admin_token"},
             )
 
         return await call_next(request)

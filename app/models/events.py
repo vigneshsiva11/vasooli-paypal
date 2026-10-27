@@ -176,7 +176,11 @@ class RevenueEventRecord(RevenueEvent):
     @classmethod
     def from_document(cls, document: dict[str, Any]) -> "RevenueEventRecord":
         """Build a record from a raw MongoDB document."""
+        from app.sanitizer import sanitize_public_dict
+
         fields = {key: value for key, value in document.items() if key != "_id"}
+        if "gateway_detail" in fields and fields["gateway_detail"]:
+            fields["gateway_detail"] = sanitize_public_dict(fields["gateway_detail"])
         return cls(id=str(document["_id"]), **fields)
 
 

@@ -11,6 +11,7 @@ Provides:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import time
 import uuid
@@ -18,13 +19,15 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from bson import ObjectId
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, Field
+from pymongo.errors import DuplicateKeyError
 
-from app.clock import advance_mongo_clock, reset_mongo_clock, _utc_now
+from app.clock import advance_mongo_clock, reset_mongo_clock, set_mongo_clock_offset, _utc_now, get_clock
 from app.config import get_settings
 from app.db import get_database
+from app.sanitizer import sanitize_public_dict
 from app.decision import ensure_indexes as ensure_decision_indexes
 from app.diagnosis import ensure_indexes as ensure_diagnosis_indexes
 from app.execution import ensure_indexes as ensure_execution_indexes
@@ -118,8 +121,14 @@ async def self_heal_stale_runs(db: Any = None) -> int:
                     curr_idx = i
                     break
 
+            filter_q: dict[str, Any] = {"status": "running"}
+            if "_id" in run:
+                filter_q["_id"] = run["_id"]
+            elif "run_id" in run:
+                filter_q["run_id"] = run["run_id"]
+
             await database.demo_runs.update_one(
-                {"_id": run["_id"], "status": "running"},
+                filter_q,
                 {
                     "$set": {
                         "status": "failed",
@@ -131,6 +140,11 @@ async def self_heal_stale_runs(db: Any = None) -> int:
                     }
                 },
             )
+            if run.get("initial_clock_offset") is not None:
+                try:
+                    await set_mongo_clock_offset(run["initial_clock_offset"], db=database)
+                except Exception as exc:
+                    logger.warning("Failed to restore clock offset during self-heal: %s", exc)
             healed_count += 1
             logger.info(
                 "Self-healed stale demo run %s (stale at step %s, last update was %s)",
@@ -143,11 +157,24 @@ async def self_heal_stale_runs(db: Any = None) -> int:
 
 
 async def ensure_demo_run_indexes(db: Any = None) -> None:
-    """Ensure indexes for demo_runs collection."""
+    """Ensure indexes for demo_runs and demo_counters collections."""
     database = db if db is not None else get_database()
     await database["demo_runs"].create_index("run_id", unique=True)
     await database["demo_runs"].create_index([("created_at", -1)])
     await database["demo_runs"].create_index("status")
+    await database["demo_runs"].create_index(
+        [("status", 1)],
+        unique=True,
+        partialFilterExpression={"status": "running"},
+        name="uniq_running_demo_run",
+    )
+    # TTL index on demo_counters (expires after 1 hour / 3600 seconds)
+    await database["demo_counters"].create_index(
+        [("created_at", 1)],
+        expireAfterSeconds=3600,
+        name="ttl_created_at_3600",
+    )
+    await database["demo_counters"].create_index([("key", 1), ("created_at", -1)])
 
 
 async def reset_demo_database(db: Any = None) -> dict[str, Any]:
@@ -180,6 +207,10 @@ async def reset_demo_database(db: Any = None) -> dict[str, Any]:
             await database[col_name].drop()
         except Exception as exc:
             logger.debug("Drop collection %s: %s", col_name, exc)
+    try:
+        await database["demo_counters"].drop()
+    except Exception as exc:
+        logger.debug("Drop demo_counters: %s", exc)
 
     # 2. Re-ensure indexes
     await ensure_event_indexes()
@@ -354,6 +385,7 @@ async def _execute_scenario_run(
     customer_ref: str,
     amount: float,
     advance_hours: float,
+    restore_clock_offset: float | None = None,
 ) -> None:
     """Background task advancing the insufficient-funds demo run."""
     db = get_database()
@@ -710,6 +742,16 @@ async def _execute_scenario_run(
                 }
             },
         )
+    finally:
+        if restore_clock_offset is not None:
+            try:
+                await set_mongo_clock_offset(restore_clock_offset, db=db)
+            except Exception as exc:
+                logger.warning(
+                    "Failed to restore clock offset after demo run %s: %s",
+                    run_id,
+                    exc,
+                )
 
 
 FORBIDDEN_PUBLIC_KEYS = {
@@ -731,11 +773,12 @@ def _clean_step_refs(refs: Any) -> dict[str, Any]:
         return {}
     cleaned = {}
     for k, v in refs.items():
-        k_lower = str(k).lower()
-        if k in FORBIDDEN_PUBLIC_KEYS or any(bad in k_lower for bad in ("vault", "email", "card", "payer")):
+        k_str = str(k)
+        k_lower = k_str.lower()
+        if k_str in FORBIDDEN_PUBLIC_KEYS or any(bad in k_lower for bad in ("vault", "email", "card", "payer", "token")):
             continue
-        cleaned[k] = v
-    return cleaned
+        cleaned[k_str] = v
+    return sanitize_public_dict(cleaned)
 
 
 def _format_public_run(doc: dict[str, Any]) -> dict[str, Any]:
@@ -757,7 +800,7 @@ def _format_public_run(doc: dict[str, Any]) -> dict[str, Any]:
         else:
             clean_steps.append(s)
 
-    return {
+    formatted = {
         "run_id": doc.get("run_id") or str(doc.get("_id")),
         "scenario": doc.get("scenario"),
         "customer_ref": doc.get("customer_ref"),
@@ -771,6 +814,7 @@ def _format_public_run(doc: dict[str, Any]) -> dict[str, Any]:
         "created_at": doc.get("created_at"),
         "updated_at": doc.get("updated_at"),
     }
+    return sanitize_public_dict(formatted)
 
 
 @router.get("/runs/{id}")
@@ -802,3 +846,278 @@ async def list_demo_runs() -> dict[str, Any]:
         async for doc in cursor
     ]
     return {"runs": runs, "total": len(runs)}
+
+
+def _get_client_ip(request: Request) -> str:
+    """Extract client IP using the rightmost X-Forwarded-For entry (else socket address).
+
+    Using the rightmost entry prevents client IP spoofing when behind a trusted reverse proxy.
+    """
+    xff = request.headers.get("x-forwarded-for") or request.headers.get("X-Forwarded-For")
+    if xff:
+        parts = [p.strip() for p in xff.split(",") if p.strip()]
+        if parts:
+            return parts[-1]
+    if request.client and request.client.host:
+        return request.client.host
+    return "127.0.0.1"
+
+
+def _derive_client_key(request: Request, salt: str = "vasooli_client_salt") -> tuple[str, int]:
+    """Derive short salted hash of client key and count XFF entries. Never leaks the address."""
+    xff = request.headers.get("x-forwarded-for") or request.headers.get("X-Forwarded-For")
+    xff_count = 0
+    client_ip = "127.0.0.1"
+    if xff:
+        parts = [p.strip() for p in xff.split(",") if p.strip()]
+        xff_count = len(parts)
+        if parts:
+            client_ip = parts[-1]
+    elif request.client and request.client.host:
+        client_ip = request.client.host
+
+    salted = f"{salt}:{client_ip}".encode("utf-8")
+    short_hash = hashlib.sha256(salted).hexdigest()[:16]
+    return short_hash, xff_count
+
+
+@router.get(
+    "/client-key",
+    dependencies=[Depends(require_admin_privileged)],
+    summary="Get derived client key hash and XFF count (admin guarded)",
+)
+async def get_demo_client_key(request: Request) -> dict[str, Any]:
+    """Return a short salted hash of the derived client key and XFF count. Never returns the address."""
+    settings = get_settings()
+    salt = settings.admin_token or "vasooli_salt"
+    client_key_hash, xff_count = _derive_client_key(request, salt=salt)
+    return {
+        "client_key_hash": client_key_hash,
+        "xff_entries": xff_count,
+    }
+
+
+class PublicDemoRunRequest(BaseModel):
+    amount: float = Field(
+        default=49.00,
+        description="Amount in USD, 10.00 to 100.00.",
+    )
+
+
+@router.post(
+    "/public/run",
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Trigger a public rate-limited demo run",
+)
+async def run_public_demo(
+    request: Request,
+    payload: PublicDemoRunRequest | None = None,
+) -> dict[str, Any]:
+    """Public scenario runner endpoint.
+
+    Requirements:
+    - Disabled unless PUBLIC_RUNS=true (403).
+    - Sandbox only (assert paypal_environment == 'sandbox').
+    - Body ignored except amount (10.00 to 100.00 USD, default 49.00).
+    - customer_ref always auto-generated 'demo-<8 hex>'.
+    - Returns 202 with run_id immediately; runs in background.
+    - One active run globally (409 Conflict).
+    - At most 3 per hour per client and 10 per hour globally (429).
+    - At least 60 seconds between runs globally (429 with Retry-After).
+    - Client key is the RIGHTMOST X-Forwarded-For entry (else socket address).
+    - Simulated clock offset recorded before run and restored afterwards on success,
+      failure, and timeout (no reset ever).
+    """
+    settings = get_settings()
+    if not getattr(settings, "public_runs", False):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Public demo runs are disabled",
+        )
+
+    if settings.paypal_environment != "sandbox":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Refused: PayPal environment must be 'sandbox'",
+        )
+
+    amount = float(payload.amount if payload is not None and payload.amount is not None else 49.00)
+    if amount < 10.00 or amount > 100.00:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Amount must be between 10.00 and 100.00 USD",
+        )
+
+    customer_ref = f"demo-{uuid.uuid4().hex[:8]}"
+
+    db = get_database()
+    await ensure_demo_run_indexes(db)
+    await self_heal_stale_runs(db)
+
+    # 1. Fast pre-check: Single active run globally (409 Conflict)
+    active_run = await db.demo_runs.find_one({"status": "running"})
+    if active_run:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="A demo scenario run is already in progress",
+        )
+
+    now = _utc_now()
+    client_ip = _get_client_ip(request)
+    client_key_hash, xff_entries = _derive_client_key(request, salt=settings.admin_token or "vasooli_salt")
+
+    # 2. Spacing check: at least 60 seconds between runs globally (429 with Retry-After)
+    latest_run = await db.demo_runs.find_one({}, sort=[("created_at", -1)])
+    if latest_run and latest_run.get("created_at"):
+        created_dt = _parse_ts(latest_run["created_at"])
+        if created_dt:
+            elapsed = (now - created_dt).total_seconds()
+            if elapsed < 60.0:
+                wait_seconds = max(1, int(60.0 - elapsed) + 1)
+                raise HTTPException(
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    detail=f"Spacing limit: please wait {wait_seconds}s before triggering another demo run",
+                    headers={"Retry-After": str(wait_seconds)},
+                )
+
+    one_hour_ago = now - timedelta(hours=1)
+    client_counter_key = f"client:{client_key_hash}"
+    global_counter_key = "global"
+
+    # 3. Per-client rate limit: at most 3 runs per hour per client
+    c_count = await db.demo_counters.count_documents(
+        {"key": client_counter_key, "created_at": {"$gte": one_hour_ago}}
+    )
+    r_count = await db.demo_runs.count_documents(
+        {"client_ip": client_ip, "created_at": {"$gte": one_hour_ago}}
+    )
+    client_runs_last_hour = max(c_count, r_count)
+
+    if client_runs_last_hour >= 3:
+        oldest_client_run = await db.demo_counters.find_one(
+            {"key": client_counter_key, "created_at": {"$gte": one_hour_ago}},
+            sort=[("created_at", 1)],
+        )
+        if not oldest_client_run:
+            oldest_client_run = await db.demo_runs.find_one(
+                {"client_ip": client_ip, "created_at": {"$gte": one_hour_ago}},
+                sort=[("created_at", 1)],
+            )
+        wait_s = 3600
+        if oldest_client_run and oldest_client_run.get("created_at"):
+            c_dt = _parse_ts(oldest_client_run["created_at"])
+            if c_dt:
+                wait_s = max(1, int(3600 - (now - c_dt).total_seconds()))
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Client rate limit exceeded: maximum 3 demo runs per hour",
+            headers={"Retry-After": str(wait_s)},
+        )
+
+    # 4. Global rate limit: at most 10 runs per hour globally
+    gc_count = await db.demo_counters.count_documents(
+        {"key": global_counter_key, "created_at": {"$gte": one_hour_ago}}
+    )
+    gr_count = await db.demo_runs.count_documents(
+        {"created_at": {"$gte": one_hour_ago}}
+    )
+    global_runs_last_hour = max(gc_count, gr_count)
+
+    if global_runs_last_hour >= 10:
+        oldest_global_run = await db.demo_counters.find_one(
+            {"key": global_counter_key, "created_at": {"$gte": one_hour_ago}},
+            sort=[("created_at", 1)],
+        )
+        if not oldest_global_run:
+            oldest_global_run = await db.demo_runs.find_one(
+                {"created_at": {"$gte": one_hour_ago}},
+                sort=[("created_at", 1)],
+            )
+        wait_s = 3600
+        if oldest_global_run and oldest_global_run.get("created_at"):
+            c_dt = _parse_ts(oldest_global_run["created_at"])
+            if c_dt:
+                wait_s = max(1, int(3600 - (now - c_dt).total_seconds()))
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Global rate limit exceeded: maximum 10 demo runs per hour",
+            headers={"Retry-After": str(wait_s)},
+        )
+
+    clock = await get_clock(db)
+    initial_offset_seconds = clock.offset_seconds
+
+    run_id = str(ObjectId())
+    steps = [
+        {
+            "name": name,
+            "status": "pending",
+            "started_at": None,
+            "finished_at": None,
+            "source": None,
+            "refs": {},
+        }
+        for name in STEP_NAMES
+    ]
+
+    run_doc = {
+        "_id": ObjectId(run_id),
+        "run_id": run_id,
+        "scenario": "insufficient-funds",
+        "customer_ref": customer_ref,
+        "amount": amount,
+        "currency": "USD",
+        "advance_hours": 25.0,
+        "client_ip": client_ip,
+        "client_key": client_key_hash,
+        "initial_clock_offset": initial_offset_seconds,
+        "status": "running",
+        "current_step": "onboard",
+        "steps": steps,
+        "final_status": None,
+        "created_at": now,
+        "updated_at": now,
+    }
+
+    # 5. Atomic insert guarded by unique partial index uniq_running_demo_run
+    try:
+        await db.demo_runs.insert_one(run_doc)
+    except DuplicateKeyError:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="A demo scenario run is already in progress",
+        )
+
+    # Record in demo_counters collection (guarded by TTL index)
+    try:
+        await db.demo_counters.insert_one({
+            "key": client_counter_key,
+            "run_id": run_id,
+            "created_at": now,
+        })
+        await db.demo_counters.insert_one({
+            "key": global_counter_key,
+            "run_id": run_id,
+            "created_at": now,
+        })
+    except Exception as exc:
+        logger.debug("Counter insertion note: %s", exc)
+
+    asyncio.create_task(
+        _execute_scenario_run(
+            run_id=run_id,
+            customer_ref=customer_ref,
+            amount=amount,
+            advance_hours=25.0,
+            restore_clock_offset=initial_offset_seconds,
+        )
+    )
+
+    return {
+        "run_id": run_id,
+        "status": "running",
+        "customer_ref": customer_ref,
+        "amount": amount,
+        "advance_hours": 25.0,
+    }
+

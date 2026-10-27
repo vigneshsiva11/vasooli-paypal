@@ -24,6 +24,7 @@ import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import httpx
 from bson import ObjectId
 from motor.motor_asyncio import AsyncIOMotorClient
 from pymongo.errors import DuplicateKeyError
@@ -148,6 +149,13 @@ async def run_integration_check() -> int:
         })
         await db.charge_attempts.delete_many({"order_id": {"$in": [decline_order_id, vault_order_id]}})
         await db.customer_vault.delete_many({"vault_id": vault_token_id})
+        await db.customer_vault.delete_many({"customer_ref": "demo-integ-test"})
+        await db.verifications.delete_many({"supplementary_data.related_ids.order_id": "ORD-DEMO-VAULT-003"})
+        await db.verifications.delete_many({"custom_id": {"$regex": "demo-integ-test"}})
+        await db.events.delete_many({"customer_ref": "demo-integ-test"})
+        await db.executions.delete_many({"gateway_ref": {"$in": ["ORD-DEMO-CARD-001", "ORD-DEMO-DECLINE-002", "ORD-DEMO-VAULT-003"]}})
+        await db.demo_runs.delete_many({})
+        await db.demo_counters.delete_many({})
 
         # 1. Seed event and execution
         event_doc = {
@@ -776,6 +784,13 @@ async def run_integration_check() -> int:
         assert single_run_view.get("run_id") == scenario_run_id
         assert single_run_view.get("amount") == 49.00
         assert "_id" not in single_run_view
+
+        # Clean up scenario runner test records so subsequent metrics or queries remain isolated
+        await db.events.delete_many({"customer_ref": "demo-integ-test"})
+        await db.customer_vault.delete_many({"customer_ref": "demo-integ-test"})
+        await db.verifications.delete_many({"supplementary_data.related_ids.order_id": "ORD-DEMO-VAULT-003"})
+        await db.verifications.delete_many({"custom_id": {"$regex": "demo-integ-test"}})
+        await db.executions.delete_many({"gateway_ref": {"$in": ["ORD-DEMO-CARD-001", "ORD-DEMO-DECLINE-002", "ORD-DEMO-VAULT-003"]}})
         # Test stale-run self-heal on real MongoDB (vasooli_regress)
         from app.routes.demo import self_heal_stale_runs
         stale_run_id = f"run_stale_real_{ObjectId()}"
@@ -806,8 +821,227 @@ async def run_integration_check() -> int:
         assert active_running is None
         print("  [PASS] Stale-run self-heal on real MongoDB (vasooli_regress): marked failed(step, 'stale') and released active lock")
 
+        # -------------------------------------------------------------------
+        # 20. Real-MongoDB Public Demo Run & Parallel Requests Integration Check
+        # -------------------------------------------------------------------
+        print("\n--- 20. Public Demo Run & Parallel Requests (Real MongoDB: vasooli_regress) ---")
+        from app.main import app as fastapi_app
+        from app.routes.demo import ensure_demo_run_indexes
+
+        # Ensure demo run and counter indexes on vasooli_regress
+        await ensure_demo_run_indexes(db)
+
+        # 20.1 Verify TTL index on demo_counters with expireAfterSeconds=3600 exists
+        counter_indexes = await db.demo_counters.index_information()
+        ttl_idx = None
+        for idx_name, idx_info in counter_indexes.items():
+            if idx_info.get("expireAfterSeconds") == 3600:
+                ttl_idx = idx_info
+                break
+        assert ttl_idx is not None, f"TTL index with expireAfterSeconds=3600 not found on demo_counters: {counter_indexes}"
+        assert ("created_at", 1) in ttl_idx.get("key", []), f"TTL index not on created_at: {ttl_idx}"
+        print("  [PASS] TTL index on demo_counters exists with expireAfterSeconds=3600 on created_at")
+
+        # 20.2 Verify unique partial index on demo_runs (status='running')
+        demo_run_indexes = await db.demo_runs.index_information()
+        partial_uniq_idx = None
+        for idx_name, idx_info in demo_run_indexes.items():
+            if idx_info.get("unique") is True and idx_info.get("partialFilterExpression") == {"status": "running"}:
+                partial_uniq_idx = idx_info
+                break
+        assert partial_uniq_idx is not None, f"Unique partial index on status='running' not found on demo_runs: {demo_run_indexes}"
+        print("  [PASS] Unique partial index on demo_runs exists for status='running'")
+
+        # 20.3 Prove atomic lock at MongoDB engine level (DuplicateKeyError on concurrent insert)
+        await db.demo_runs.delete_many({"scenario": "insufficient-funds"})
+        await db.demo_counters.delete_many({})
+
+        probe_run_id = f"atomic_probe_{ObjectId()}"
+        await db.demo_runs.insert_one({
+            "run_id": probe_run_id,
+            "scenario": "insufficient-funds",
+            "status": "running",
+            "created_at": datetime.now(timezone.utc),
+        })
+        atomic_duplicate_raised = False
+        try:
+            await db.demo_runs.insert_one({
+                "run_id": f"collision_{ObjectId()}",
+                "scenario": "insufficient-funds",
+                "status": "running",
+                "created_at": datetime.now(timezone.utc),
+            })
+        except DuplicateKeyError:
+            atomic_duplicate_raised = True
+        assert atomic_duplicate_raised, "MongoDB failed to raise DuplicateKeyError for second running doc"
+        await db.demo_runs.delete_one({"run_id": probe_run_id})
+        print("  [PASS] Atomic lock proven on real MongoDB: unique partial index raises DuplicateKeyError on collision")
+
+        # 20.4 Fire 8 simultaneous POST /demo/public/run requests through the app
+        # Settings configured with PUBLIC_RUNS=True and sandbox assertion satisfied
+        app.db._database = db
+        mock_settings = settings.model_copy(
+            update={
+                "public_demo": True,
+                "public_runs": True,
+                "paypal_environment": "sandbox",
+                "mongodb_db_name": "vasooli_regress",
+            }
+        )
+
+        async def mock_slow_execution(*args, **kwargs):
+            await asyncio.sleep(2.0)
+
+        # Clear runs and counters before parallel burst
+        await db.demo_runs.delete_many({})
+        await db.demo_counters.delete_many({})
+
+        with patch("app.routes.demo.get_settings", return_value=mock_settings), \
+             patch("app.routes.demo._execute_scenario_run", side_effect=mock_slow_execution):
+
+            transport = httpx.ASGITransport(app=fastapi_app)
+            async with httpx.AsyncClient(transport=transport, base_url="http://test") as http_client:
+                # 8 simultaneous requests with the same client IP
+                responses = await asyncio.gather(
+                    *[
+                        http_client.post(
+                            "/demo/public/run",
+                            json={"amount": 49.00},
+                            headers={"X-Forwarded-For": "203.0.113.195"},
+                        )
+                        for _ in range(8)
+                    ]
+                )
+
+                statuses = [r.status_code for r in responses]
+                accepted = [r for r in responses if r.status_code == 202]
+                conflicts_or_rate_limits = [r for r in responses if r.status_code in (409, 429)]
+
+                assert len(accepted) == 1, f"Expected exactly ONE 202 Accepted, got {len(accepted)} (statuses: {statuses})"
+                assert len(conflicts_or_rate_limits) == 7, f"Expected 7 rejected (409 or 429), got {len(conflicts_or_rate_limits)} (statuses: {statuses})"
+                assert all(code in (202, 409, 429) for code in statuses), f"Unexpected status code in {statuses}"
+
+                # Verify demo_runs holds exactly ONE active run
+                active_runs_count = await db.demo_runs.count_documents({"status": "running"})
+                assert active_runs_count == 1, f"Expected exactly 1 active run in demo_runs, found {active_runs_count}"
+                print(f"  [PASS] 8 simultaneous requests through app: exactly 1 accepted (202), 7 rejected (409/429), 1 active run in demo_runs")
+
+                # 20.5 Test 60s spacing holds across parallel requests on real MongoDB
+                # Mark the active run as completed so 409 conflict does not shadow spacing
+                await db.demo_runs.update_one({"status": "running"}, {"$set": {"status": "completed"}})
+                spacing_responses = await asyncio.gather(
+                    *[
+                        http_client.post(
+                            "/demo/public/run",
+                            json={"amount": 49.00},
+                            headers={"X-Forwarded-For": f"198.51.100.{i}"},
+                        )
+                        for i in range(1, 5)
+                    ]
+                )
+                assert all(r.status_code == 429 for r in spacing_responses), f"Expected all 429 for spacing, got {[r.status_code for r in spacing_responses]}"
+                for r in spacing_responses:
+                    assert "Retry-After" in r.headers, "Missing Retry-After header on spacing 429"
+                    assert "Spacing limit" in r.json().get("detail", "")
+                print("  [PASS] 60s spacing holds across parallel requests on real MongoDB (all return 429 with Retry-After)")
+
+                # 20.6 Test per-client hourly limit (max 3/hr) holds across parallel requests
+                # Age existing runs beyond 60s spacing window
+                age_dt = datetime.now(timezone.utc) - timedelta(minutes=5)
+                await db.demo_runs.update_many({}, {"$set": {"created_at": age_dt}})
+                await db.demo_counters.update_many({}, {"$set": {"created_at": age_dt}})
+
+                from app.routes.demo import _derive_client_key
+                from starlette.requests import Request as StarletteRequest
+                salt = mock_settings.admin_token or "vasooli_salt"
+                scope = {
+                    "type": "http",
+                    "method": "POST",
+                    "path": "/demo/public/run",
+                    "headers": [(b"x-forwarded-for", b"203.0.113.195")],
+                }
+                c_hash, _ = _derive_client_key(StarletteRequest(scope), salt=salt)
+                client_key_tag = f"client:{c_hash}"
+
+                await db.demo_counters.insert_many([
+                    {"key": client_key_tag, "run_id": f"r_c_{ObjectId()}", "created_at": age_dt},
+                    {"key": client_key_tag, "run_id": f"r_c_{ObjectId()}", "created_at": age_dt},
+                ])
+                await db.demo_runs.insert_many([
+                    {
+                        "run_id": f"r_c_run_{ObjectId()}",
+                        "scenario": "insufficient-funds",
+                        "client_ip": "203.0.113.195",
+                        "status": "completed",
+                        "created_at": age_dt,
+                    },
+                    {
+                        "run_id": f"r_c_run_{ObjectId()}",
+                        "scenario": "insufficient-funds",
+                        "client_ip": "203.0.113.195",
+                        "status": "completed",
+                        "created_at": age_dt,
+                    },
+                ])
+
+                client_limit_responses = await asyncio.gather(
+                    *[
+                        http_client.post(
+                            "/demo/public/run",
+                            json={"amount": 49.00},
+                            headers={"X-Forwarded-For": "203.0.113.195"},
+                        )
+                        for _ in range(3)
+                    ]
+                )
+                assert all(r.status_code == 429 for r in client_limit_responses), f"Expected 429 for client limit, got {[r.status_code for r in client_limit_responses]}"
+                for r in client_limit_responses:
+                    assert "Retry-After" in r.headers
+                    assert "Client rate limit exceeded" in r.json().get("detail", "")
+                print("  [PASS] Per-client hourly limit (3/hr) holds across parallel requests (429 with Retry-After)")
+
+                # 20.7 Test global hourly limit (max 10/hr) holds across parallel requests
+                await db.demo_counters.delete_many({})
+                await db.demo_runs.delete_many({})
+
+                global_runs = [
+                    {"key": "global", "run_id": f"r_g_{i}_{ObjectId()}", "created_at": age_dt}
+                    for i in range(10)
+                ]
+                await db.demo_counters.insert_many(global_runs)
+                await db.demo_runs.insert_many([
+                    {
+                        "run_id": f"r_g_run_{i}_{ObjectId()}",
+                        "scenario": "insufficient-funds",
+                        "client_ip": f"10.0.0.{i+1}",
+                        "status": "completed",
+                        "created_at": age_dt,
+                    }
+                    for i in range(10)
+                ])
+
+                global_limit_responses = await asyncio.gather(
+                    *[
+                        http_client.post(
+                            "/demo/public/run",
+                            json={"amount": 49.00},
+                            headers={"X-Forwarded-For": f"10.0.1.{i+1}"},
+                        )
+                        for i in range(3)
+                    ]
+                )
+                assert all(r.status_code == 429 for r in global_limit_responses), f"Expected 429 for global limit, got {[r.status_code for r in global_limit_responses]}"
+                for r in global_limit_responses:
+                    assert "Retry-After" in r.headers
+                    assert "Global rate limit exceeded" in r.json().get("detail", "")
+                print("  [PASS] Global hourly limit (10/hr) holds across parallel requests (429 with Retry-After)")
+
+        # Cleanup test documents
+        await db.demo_runs.delete_many({})
+        await db.demo_counters.delete_many({})
+
         print("\n" + "=" * 78)
-        print("RESULT: ALL INTEGRATION CHECKS PASSED (19/19)")
+        print("RESULT: ALL INTEGRATION CHECKS PASSED (20/20)")
         print("=" * 78)
         return 0
 

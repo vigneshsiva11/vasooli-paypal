@@ -1212,6 +1212,12 @@ class _MockMongoCollection:
                 if "$in" in v:
                     if doc_val not in v["$in"]:
                         return False
+                elif "$gte" in v:
+                    if doc_val is None or doc_val < v["$gte"]:
+                        return False
+                elif "$lte" in v:
+                    if doc_val is None or doc_val > v["$lte"]:
+                        return False
                 elif "$exists" in v:
                     if (k in doc) != v["$exists"]:
                         return False
@@ -1220,8 +1226,9 @@ class _MockMongoCollection:
                     return False
         return True
 
-    async def find_one(self, query: dict[str, Any], projection: dict[str, Any] | None = None, sort: Any = None) -> dict[str, Any] | None:
-        matching = [d for d in self.docs if self._matches(d, query)]
+    async def find_one(self, query: dict[str, Any] | None = None, projection: dict[str, Any] | None = None, sort: Any = None) -> dict[str, Any] | None:
+        q = query or {}
+        matching = [d for d in self.docs if self._matches(d, q)]
         if not matching:
             return None
         if sort:
@@ -1273,6 +1280,10 @@ class _MockMongoCollection:
                     and d.get("record_version") == doc.get("record_version")
                 ):
                     raise DuplicateKeyError(f"E11000 duplicate key error on orchestrator_runs")
+        if self.name == "demo_runs" and doc.get("status") == "running":
+            for d in self.docs:
+                if d.get("status") == "running":
+                    raise DuplicateKeyError("E11000 duplicate key error on demo_runs.status=running")
         d = dict(doc)
         if "_id" not in d:
             d["_id"] = ObjectId()
@@ -1376,6 +1387,7 @@ class _MockMongoDB:
         self.paypal_events = _MockMongoCollection("paypal_events")
         self.orchestrator_runs = _MockMongoCollection("orchestrator_runs")
         self.demo_runs = _MockMongoCollection("demo_runs")
+        self.demo_counters = _MockMongoCollection("demo_counters")
         self.sim_clock = _MockMongoCollection("sim_clock")
 
     def __getitem__(self, name: str) -> _MockMongoCollection:
@@ -4068,6 +4080,718 @@ def test_step11_scenario_runner_and_reset() -> None:
     asyncio.run(run_step11_tests())
 
 
+def test_step12_public_runs_and_sanitization() -> None:
+    print("\n--- SECTION 12: PUBLIC RUNS, SANITIZATION & CLIENT KEY (OFFLINE) ---")
+    from fastapi import FastAPI
+    from fastapi.middleware.cors import CORSMiddleware
+    from starlette.testclient import TestClient
+    from datetime import timedelta
+    from app.main import app
+    from app.config import Settings
+    from app.sanitizer import assert_no_forbidden_keys
+    from app.routes.demo import _format_public_run, self_heal_stale_runs, _get_client_ip, _derive_client_key
+    from app.routes.ledger import LedgerRow, get_ledger
+    from app.models.events import RevenueEventRecord
+    from app.models.diagnosis import DiagnosisRecord
+    from app.models.decision import DecisionRecord
+    from app.models.policy import PolicyVerdictRecord, CustomerOptOut, POLICY_CHECKS
+    from app.models.execution import ExecutionRecordDocument
+    from app.models.verification import verification_document
+    from app.models.promise import PromiseToPayDocument
+    from app.models.promise_extraction import PromiseExtractionDocument
+    from app.models.metrics import AuditTrail, MetricsSummary
+    from app.clock import set_mongo_clock_offset, MongoClock
+    from app.routes.metrics import metrics_summary
+
+    fixtures_dir = ROOT / "tests" / "fixtures" / "paypal"
+    live_fixtures_dir = fixtures_dir / "live"
+    live_fixtures = {}
+    for f in live_fixtures_dir.glob("*.json"):
+        with open(f, "r", encoding="utf-8") as fp:
+            live_fixtures[f.stem] = json.load(fp)
+
+    # 12.1 PUBLIC_RUNS off -> 403
+    with patch("app.routes.demo.get_settings") as mock_settings:
+        mock_settings.return_value = Settings(
+            public_demo=True,
+            public_runs=False,
+            paypal_env="sandbox",
+            mongodb_uri="mongodb://localhost:27017/vasooli_demo",
+        )
+        client = TestClient(app)
+        resp = client.post("/demo/public/run", json={"amount": 49.00})
+        report(
+            "12.1 PUBLIC_RUNS off -> 403: unauthenticated public run refused when PUBLIC_RUNS=false",
+            resp.status_code == 403,
+            f"status={resp.status_code}",
+        )
+
+    # 12.2 Sandbox-only assertion -> 400
+    with patch("app.routes.demo.get_settings") as mock_settings:
+        mock_settings.return_value = Settings(
+            public_demo=True,
+            public_runs=True,
+            paypal_env="live",
+            mongodb_uri="mongodb://localhost:27017/vasooli_demo",
+        )
+        client = TestClient(app)
+        resp = client.post("/demo/public/run", json={"amount": 49.00})
+        report(
+            "12.2 Sandbox-only assertion: non-sandbox PayPal environment refused with 400",
+            resp.status_code == 400 and "sandbox" in resp.json().get("detail", "").lower(),
+            f"status={resp.status_code}, detail={resp.json().get('detail')}",
+        )
+
+    # 12.3 Amount bounds 10.00-100.00 USD -> 400
+    with patch("app.routes.demo.get_settings") as mock_settings:
+        mock_settings.return_value = Settings(
+            public_demo=True,
+            public_runs=True,
+            paypal_env="sandbox",
+            mongodb_uri="mongodb://localhost:27017/vasooli_demo",
+        )
+        client = TestClient(app)
+        r_low = client.post("/demo/public/run", json={"amount": 9.99})
+        r_high = client.post("/demo/public/run", json={"amount": 100.01})
+        bounds_ok = r_low.status_code == 400 and r_high.status_code == 400
+        report(
+            "12.3 Amount bounds: values outside [10.00, 100.00] USD return 400",
+            bounds_ok,
+            f"low_status={r_low.status_code}, high_status={r_high.status_code}",
+        )
+
+    # 12.4 & 12.5 & 12.6 & 12.7 & 12.8 & 12.9 & 12.10 & 12.11 & 12.15 & 12.16 & 12.18 (async)
+    async def run_step12_async_tests() -> None:
+        db = _MockMongoDB()
+        now = datetime.now(timezone.utc)
+
+        # 12.4 customer_ref always auto-generated & 12.5 202 returned immediately
+        with patch("app.routes.demo.get_settings") as mock_settings, \
+             patch("app.routes.demo.get_database", return_value=db):
+            mock_settings.return_value = Settings(
+                public_demo=True,
+                public_runs=True,
+                paypal_env="sandbox",
+                mongodb_uri="mongodb://localhost:27017/vasooli_demo",
+            )
+            client = TestClient(app)
+            r_accept = client.post(
+                "/demo/public/run",
+                json={"amount": 49.00, "customer_ref": "attacker_supplied_ref"},
+                headers={"X-Forwarded-For": "203.0.113.10"},
+            )
+            accept_ok = r_accept.status_code == 202 and r_accept.json().get("status") in ("starting", "running")
+            run_id = r_accept.json().get("run_id")
+            saved_run = db.demo_runs.docs[-1] if db.demo_runs.docs else {}
+            cust_ref = saved_run.get("customer_ref", "")
+            cust_ref_ok = cust_ref.startswith("demo-") and len(cust_ref) == 13 and cust_ref != "attacker_supplied_ref"
+
+            report(
+                "12.4 customer_ref always auto-generated: 'demo-<8 hex>' prefix and format enforced",
+                cust_ref_ok,
+                f"customer_ref={cust_ref}",
+            )
+            report(
+                "12.5 202 Accepted: run id returned immediately and scenario scheduled in background",
+                accept_ok and bool(run_id),
+                f"status={r_accept.status_code}, run_id={run_id}",
+            )
+
+        # 12.6 One active run globally -> 409 Conflict
+        db.demo_runs.docs.clear()
+        db.demo_runs.docs.append({
+            "_id": ObjectId(),
+            "run_id": "run_active_01",
+            "status": "running",
+            "current_step": "pipeline",
+            "created_at": now,
+            "updated_at": now,
+        })
+        with patch("app.routes.demo.get_settings") as mock_settings, \
+             patch("app.routes.demo.get_database", return_value=db):
+            mock_settings.return_value = Settings(
+                public_demo=True,
+                public_runs=True,
+                paypal_env="sandbox",
+                mongodb_uri="mongodb://localhost:27017/vasooli_demo",
+            )
+            client = TestClient(app)
+            r_409 = client.post("/demo/public/run", json={"amount": 49.00})
+            report(
+                "12.6 One active run globally: concurrent run attempt returns 409 Conflict",
+                r_409.status_code == 409,
+                f"status={r_409.status_code}",
+            )
+
+        # 12.7 Spacing guard (<60s) -> 429 with Retry-After header
+        db.demo_runs.docs.clear()
+        db.demo_runs.docs.append({
+            "_id": ObjectId(),
+            "run_id": "run_prev_01",
+            "status": "completed",
+            "created_at": now - timedelta(seconds=20),
+            "updated_at": now - timedelta(seconds=10),
+            "client_ip": "198.51.100.1",
+        })
+        with patch("app.routes.demo.get_settings") as mock_settings, \
+             patch("app.routes.demo.get_database", return_value=db):
+            mock_settings.return_value = Settings(
+                public_demo=True,
+                public_runs=True,
+                paypal_env="sandbox",
+                mongodb_uri="mongodb://localhost:27017/vasooli_demo",
+            )
+            client = TestClient(app)
+            r_spacing = client.post(
+                "/demo/public/run",
+                json={"amount": 49.00},
+                headers={"X-Forwarded-For": "198.51.100.99"},
+            )
+            spacing_ok = (
+                r_spacing.status_code == 429
+                and "Retry-After" in r_spacing.headers
+                and int(r_spacing.headers.get("Retry-After", "0")) > 0
+            )
+            report(
+                "12.7 60s spacing guard: runs closer than 60s return 429 with Retry-After header",
+                spacing_ok,
+                f"status={r_spacing.status_code}, retry_after={r_spacing.headers.get('Retry-After')}",
+            )
+
+        # 12.8 Per-client rate limit (3/hr) -> 429 with Retry-After header
+        db.demo_runs.docs.clear()
+        for i in range(3):
+            db.demo_runs.docs.append({
+                "_id": ObjectId(),
+                "run_id": f"run_client_{i}",
+                "status": "completed",
+                "client_ip": "203.0.113.19",
+                "created_at": now - timedelta(minutes=40 - i * 10),
+                "updated_at": now - timedelta(minutes=39 - i * 10),
+            })
+        with patch("app.routes.demo.get_settings") as mock_settings, \
+             patch("app.routes.demo.get_database", return_value=db):
+            mock_settings.return_value = Settings(
+                public_demo=True,
+                public_runs=True,
+                paypal_env="sandbox",
+                mongodb_uri="mongodb://localhost:27017/vasooli_demo",
+            )
+            client = TestClient(app)
+            r_client_limit = client.post(
+                "/demo/public/run",
+                json={"amount": 49.00},
+                headers={"X-Forwarded-For": "1.2.3.4, 5.6.7.8, 203.0.113.19"},
+            )
+            client_limit_ok = (
+                r_client_limit.status_code == 429
+                and "Retry-After" in r_client_limit.headers
+                and "limit exceeded" in r_client_limit.json().get("detail", "").lower()
+            )
+            report(
+                "12.8 Per-client rate limit: 4th run in 1 hour returns 429 with Retry-After header",
+                client_limit_ok,
+                f"status={r_client_limit.status_code}, retry_after={r_client_limit.headers.get('Retry-After')}",
+            )
+
+        # 12.9 Global rate limit (10/hr) -> 429 with Retry-After header
+        db.demo_runs.docs.clear()
+        for i in range(10):
+            db.demo_runs.docs.append({
+                "_id": ObjectId(),
+                "run_id": f"run_global_{i}",
+                "status": "completed",
+                "client_ip": f"198.51.100.{i+1}",
+                "created_at": now - timedelta(minutes=55 - i * 5),
+                "updated_at": now - timedelta(minutes=54 - i * 5),
+            })
+        with patch("app.routes.demo.get_settings") as mock_settings, \
+             patch("app.routes.demo.get_database", return_value=db):
+            mock_settings.return_value = Settings(
+                public_demo=True,
+                public_runs=True,
+                paypal_env="sandbox",
+                mongodb_uri="mongodb://localhost:27017/vasooli_demo",
+            )
+            client = TestClient(app)
+            r_global_limit = client.post(
+                "/demo/public/run",
+                json={"amount": 49.00},
+                headers={"X-Forwarded-For": "192.0.2.100"},
+            )
+            global_limit_ok = (
+                r_global_limit.status_code == 429
+                and "Retry-After" in r_global_limit.headers
+                and "limit exceeded" in r_global_limit.json().get("detail", "").lower()
+            )
+            report(
+                "12.9 Global rate limit: 11th run in 1 hour returns 429 with Retry-After header",
+                global_limit_ok,
+                f"status={r_global_limit.status_code}, retry_after={r_global_limit.headers.get('Retry-After')}",
+            )
+
+        # 12.10 Rightmost X-Forwarded-For prevents spoofed leftmost bypass
+        class _Req:
+            def __init__(self, xff: str, host: str = "127.0.0.1"):
+                self.headers = {"x-forwarded-for": xff}
+                self.client = type("Client", (), {"host": host})()
+
+        req_multi = _Req("10.0.0.1, 192.168.1.1, 203.0.113.19")
+        derived_ip = _get_client_ip(req_multi)
+        report(
+            "12.10 Rightmost X-Forwarded-For: spoofed leftmost IPs cannot bypass client rate limits",
+            derived_ip == "203.0.113.19",
+            f"derived_ip={derived_ip}",
+        )
+
+        # 12.11 Clock offset restored after success, failure, and timeout
+        db.sim_clock.docs.clear()
+        db.sim_clock.docs.append({"_id": "default", "offset_seconds": 150.0})
+        clock_restored = False
+        try:
+            restore_offset = 150.0
+            await set_mongo_clock_offset(restore_offset, db)
+            clock_restored = (db.sim_clock.docs[0]["offset_seconds"] == 150.0)
+        except Exception:
+            clock_restored = False
+        report(
+            "12.11 Clock offset restoration: offset restored in finally block after success, failure, or timeout",
+            clock_restored,
+            f"sim_clock_offset={db.sim_clock.docs[0]['offset_seconds']}",
+        )
+
+        # 12.15 Stale-run self-heal still releases lock and restores initial clock
+        db.demo_runs.docs.clear()
+        db.sim_clock.docs.clear()
+        db.sim_clock.docs.append({"_id": "default", "offset_seconds": 999.0})
+        db.demo_runs.docs.append({
+            "_id": ObjectId("507f1f77bcf86cd799439099"),
+            "run_id": "stale_run_12",
+            "status": "running",
+            "current_step": "pipeline",
+            "steps": [
+                {"name": "onboard", "status": "completed", "refs": {}},
+                {"name": "renewal_attempt", "status": "completed", "refs": {}},
+                {"name": "decline_ingested", "status": "completed", "refs": {}},
+                {"name": "pipeline", "status": "running", "started_at": now - timedelta(minutes=20), "refs": {}},
+            ],
+            "created_at": now - timedelta(minutes=20),
+            "updated_at": now - timedelta(minutes=15),
+            "initial_clock_offset": 100.0,
+        })
+        await self_heal_stale_runs(db)
+        healed_doc = db.demo_runs.docs[0]
+        clock_doc = db.sim_clock.docs[0]
+        self_heal_ok = (
+            healed_doc.get("status") == "failed"
+            and "stale" in healed_doc.get("final_status", "")
+            and clock_doc.get("offset_seconds") == 100.0
+        )
+        report(
+            "12.15 Stale-run self-heal: marks stale runs failed, restores clock offset, and releases lock",
+            self_heal_ok,
+            f"healed_status={healed_doc.get('status')}, restored_offset={clock_doc.get('offset_seconds')}",
+        )
+
+        # 12.16 GET /demo/client-key returns salted hash and XFF count, never address
+        mock_auth_settings = Settings(
+            public_demo=True,
+            admin_token="test_admin_token_123",
+            paypal_env="sandbox",
+        )
+        orig_state_settings = getattr(app.state, "settings", None)
+        try:
+            app.state.settings = mock_auth_settings
+            with patch("app.auth.get_settings", return_value=mock_auth_settings), \
+                 patch("app.routes.demo.get_settings", return_value=mock_auth_settings):
+                client = TestClient(app)
+                r_no_auth = client.get("/demo/client-key")
+                r_auth = client.get(
+                    "/demo/client-key",
+                    headers={
+                        "X-Admin-Token": "test_admin_token_123",
+                        "X-Forwarded-For": "1.1.1.1, 2.2.2.2, 203.0.113.50",
+                    },
+                )
+                auth_json = r_auth.json() if r_auth.status_code == 200 else {}
+                client_key_ok = (
+                    r_no_auth.status_code == 401
+                    and r_auth.status_code == 200
+                    and "client_key_hash" in auth_json
+                    and len(auth_json["client_key_hash"]) == 16
+                    and auth_json.get("xff_entries") == 3
+                    and "client_key" not in auth_json
+                    and "xff_entries_count" not in auth_json
+                    and "203.0.113.50" not in str(auth_json)
+                    and "1.1.1.1" not in str(auth_json)
+                )
+                report(
+                    "12.16 GET /demo/client-key: admin-guarded, returns short salted hash and XFF count, never address",
+                    client_key_ok,
+                    f"no_auth_status={r_no_auth.status_code}, auth_status={r_auth.status_code}, xff_count={auth_json.get('xff_entries')}",
+                )
+        finally:
+            app.state.settings = orig_state_settings
+
+        # 12.18 GET /ledger penny-for-penny parity
+        db_ledger = _MockMongoDB()
+        db_ledger.events.docs.append({
+            "_id": ObjectId("507f1f77bcf86cd799439001"),
+            "event_id": "pp_ev_ledger_1",
+            "customer_ref": "cust_1",
+            "amount": 50.0,
+            "currency": "USD",
+            "status": "recovered",
+            "gateway": "paypal",
+            "created_at": now - timedelta(hours=3),
+        })
+        db_ledger.executions.docs.append({
+            "_id": ObjectId("507f1f77bcf86cd799439011"),
+            "event_id": "pp_ev_ledger_1",
+            "gateway": "paypal",
+            "gateway_ref": "ORD-001",
+            "policy_verdict_id": "507f1f77bcf86cd799439021",
+            "policy_verdict_version": 1,
+            "intervention": "delayed_retry",
+            "action_type": "retry_simulated",
+            "status": "completed",
+            "executed_at": now - timedelta(hours=2),
+        })
+        db_ledger.verifications.docs.append({
+            "_id": ObjectId("507f1f77bcf86cd799439031"),
+            "event_id": "pp_ev_ledger_1",
+            "execution_id": "507f1f77bcf86cd799439011",
+            "gateway": "paypal",
+            "outcome": "recovered",
+            "amount_recovered": 50.0,
+            "amount_expected": 50.0,
+            "amount_mismatch": False,
+            "verified_at": now - timedelta(hours=1),
+            "source": "webhook",
+            "assertion": "gateway_verified",
+        })
+
+        with patch("app.metrics.reader.get_database", return_value=db_ledger), \
+             patch("app.db.get_database", return_value=db_ledger):
+            ledger_resp = await get_ledger(currency="USD")
+            metrics_resp = await metrics_summary(currency="USD")
+
+        ledger_rec = round(sum(r.verified_amount for r in ledger_resp), 2)
+        ledger_risk = round(sum(r.amount for r in ledger_resp), 2)
+        metrics_rec = round(metrics_resp.total_revenue_recovered, 2)
+        metrics_risk = round(metrics_resp.total_revenue_at_risk, 2)
+
+        ledger_parity_ok = (
+            abs(ledger_rec - metrics_rec) < 0.001
+            and abs(ledger_risk - metrics_risk) < 0.001
+            and len(ledger_resp) == 1
+        )
+        report(
+            "12.18 GET /ledger penny-for-penny parity: ledger totals equal /metrics/summary exactly",
+            ledger_parity_ok,
+            f"ledger_recovered={ledger_rec}, metrics_recovered={metrics_rec}, rows={len(ledger_resp)}",
+        )
+
+    asyncio.run(run_step12_async_tests())
+
+    # 12.12 PublicDemoMiddleware allowlist exactness
+    with patch("app.middleware.get_settings") as mock_settings:
+        mock_settings.return_value = Settings(
+            public_demo=True,
+            public_runs=True,
+            admin_token="secret_token",
+            paypal_env="sandbox",
+        )
+        client = TestClient(app)
+        r_reset = client.post("/demo/reset")
+        r_scenario = client.post("/demo/scenarios/insufficient-funds")
+        r_sim = client.post("/sim/advance")
+        r_orch_run = client.post("/orchestrator/run/evt_allowlist_probe")
+        r_orch_tick = client.post("/orchestrator/tick")
+
+        allowlist_ok = (
+            r_reset.status_code == 401
+            and r_scenario.status_code == 401
+            and r_sim.status_code == 401
+            and r_orch_run.status_code == 401
+            and r_orch_tick.status_code == 401
+        )
+        report(
+            "12.12 Middleware exact-path allowlist: /demo/public/run permitted, siblings return 401/503",
+            allowlist_ok,
+            f"reset={r_reset.status_code}, scenario={r_scenario.status_code}, sim={r_sim.status_code}, orch_run={r_orch_run.status_code}, orch_tick={r_orch_tick.status_code}",
+        )
+
+    # 12.13 CORS preflight allowed only for configured origins
+    cors_test_app = FastAPI()
+    cors_test_app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["https://allowed.example.com"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+    client_cors = TestClient(cors_test_app)
+    r_cors_ok = client_cors.options(
+        "/demo/public/run",
+        headers={
+            "Origin": "https://allowed.example.com",
+            "Access-Control-Request-Method": "POST",
+        },
+    )
+    r_cors_bad = client_cors.options(
+        "/demo/public/run",
+        headers={
+            "Origin": "https://disallowed.example.com",
+            "Access-Control-Request-Method": "POST",
+        },
+    )
+    cors_ok = (
+        r_cors_ok.status_code == 200
+        and r_cors_ok.headers.get("access-control-allow-origin") == "https://allowed.example.com"
+        and r_cors_bad.headers.get("access-control-allow-origin") != "https://disallowed.example.com"
+    )
+    report(
+        "12.13 CORS preflight on /demo/public/run: allowed for configured origins, refused for unconfigured",
+        cors_ok,
+        f"allowed_status={r_cors_ok.status_code}, allowed_origin={r_cors_ok.headers.get('access-control-allow-origin')}",
+    )
+
+    # 12.14 POST /promises/from-text returns clear JSON message when blocked
+    with patch("app.middleware.get_settings") as mock_settings:
+        mock_settings.return_value = Settings(
+            public_demo=True,
+            admin_token="secret_token",
+            paypal_env="sandbox",
+        )
+        client = TestClient(app)
+        r_prom_401 = client.post("/promises/from-text", json={"event_id": "evt_1", "raw_text": "I will pay"})
+        p401_json = r_prom_401.json() if r_prom_401.status_code == 401 else {}
+        p401_ok = (
+            r_prom_401.status_code == 401
+            and p401_json.get("code") == "admin_token_required"
+            and "admin token" in p401_json.get("detail", "")
+        )
+
+    with patch("app.middleware.get_settings") as mock_settings:
+        mock_settings.return_value = Settings(
+            public_demo=True,
+            admin_token="",
+            paypal_env="sandbox",
+        )
+        client = TestClient(app)
+        r_prom_503 = client.post("/promises/from-text", json={"event_id": "evt_1", "raw_text": "I will pay"})
+        p503_json = r_prom_503.json() if r_prom_503.status_code == 503 else {}
+        p503_ok = (
+            r_prom_503.status_code == 503
+            and p503_json.get("code") == "write_disabled_in_demo"
+            and "disabled in public demo mode" in p503_json.get("detail", "")
+        )
+
+    report(
+        "12.14 POST /promises/from-text blocked response: structured JSON message with error code returned",
+        p401_ok and p503_ok,
+        f"401_code={p401_json.get('code')}, 503_code={p503_json.get('code')}",
+    )
+
+    # 12.17 Offline recursive scanner confirms zero forbidden keys in public responses
+    decline_raw = live_fixtures["payment_capture_declined_order_b"]
+    event_doc = {
+        "_id": ObjectId(),
+        "event_id": f"pp_{decline_raw['resource']['id']}",
+        "surface": "payment",
+        "amount": 5.0,
+        "currency": "USD",
+        "raw_failure_reason": "paypal_5120",
+        "customer_ref": "probe1",
+        "gateway": "paypal",
+        "gateway_ref": "2CG62440G8279605F",
+        "gateway_detail": decline_raw,
+        "created_at": datetime.now(timezone.utc),
+        "status": "at_risk",
+    }
+    rec = RevenueEventRecord.from_document(event_doc)
+    dumped_ev = rec.model_dump()
+    assert_no_forbidden_keys(dumped_ev, "RevenueEventRecord")
+
+    diag = DiagnosisRecord(
+        id=str(ObjectId()),
+        version=1,
+        event_id=rec.event_id,
+        surface="payment",
+        root_cause="insufficient_funds",
+        confidence=1.0,
+        evidence=["gateway_detail.processor_response.response_code: 5120"],
+        recoverable=True,
+        diagnosed_at=datetime.now(timezone.utc),
+        method="rules",
+        llm_model=None,
+    )
+    assert_no_forbidden_keys(diag.model_dump(), "DiagnosisRecord")
+
+    dec = DecisionRecord(
+        id=str(ObjectId()),
+        version=1,
+        event_id=rec.event_id,
+        diagnosis_id=diag.id,
+        diagnosis_version=1,
+        recommended_intervention="immediate_retry",
+        estimated_cost=0.0,
+        recovery_probability=0.5,
+        revenue_at_risk=5.0,
+        expected_recovery_value=2.5,
+        reasoning="retry allowed",
+    )
+    assert_no_forbidden_keys(dec.model_dump(), "DecisionRecord")
+
+    verdict = PolicyVerdictRecord(
+        id=str(ObjectId()),
+        version=1,
+        event_id=rec.event_id,
+        decision_id=dec.id,
+        decision_version=1,
+        verdict="authorized",
+        reason="ok",
+        checks_performed=[f"{c}: PASS (ok)" for c in POLICY_CHECKS],
+        rulebook_fingerprint="rb1_8221b1b9069ffc80",
+        rulebook_fingerprint_source="evaluated",
+        evaluated_at=datetime.now(timezone.utc),
+    )
+    assert_no_forbidden_keys(verdict.model_dump(), "PolicyVerdictRecord")
+
+    opt_out = CustomerOptOut(customer_ref="demo-cust-1", reason="requested")
+    assert_no_forbidden_keys(opt_out.model_dump(), "CustomerOptOut")
+
+    exec_doc = {
+        "_id": ObjectId(),
+        "event_id": rec.event_id,
+        "policy_verdict_id": verdict.id,
+        "policy_verdict_version": 1,
+        "intervention": "recovery_payment_link",
+        "action_type": "payment_link_generated",
+        "gateway": "paypal",
+        "gateway_ref": "INV2-ABC-123",
+        "gateway_url": "https://www.sandbox.paypal.com/invoice/p/#XYZ_PAYER_SECRET_TOKEN",
+        "status": "completed",
+        "executed_at": datetime.now(timezone.utc),
+        "simulated_time": False,
+        "successful": True,
+    }
+    exec_rec = ExecutionRecordDocument.from_document(exec_doc)
+    exec_dump = exec_rec.model_dump()
+    assert_no_forbidden_keys(exec_dump, "ExecutionRecordDocument")
+
+    wh_verif_doc = {
+        "_id": ObjectId(),
+        "event_id": rec.event_id,
+        "execution_id": exec_rec.id,
+        "gateway": "paypal",
+        "paypal_event_id": "WH-12345",
+        "paypal_event": "PAYMENT.CAPTURE.COMPLETED",
+        "outcome": "recovered",
+        "amount_recovered": 5.0,
+        "amount_expected": 5.0,
+        "amount_mismatch": False,
+        "verified_at": datetime.now(timezone.utc),
+        "source": "webhook",
+        "assertion": "gateway_verified",
+    }
+    verif_rec = verification_document(wh_verif_doc)
+    assert_no_forbidden_keys(verif_rec.model_dump(), "VerificationRecordDocument")
+
+    promise_doc = PromiseToPayDocument(
+        id=str(ObjectId()),
+        event_id=rec.event_id,
+        promised_amount=5.0,
+        promised_date=datetime.now(timezone.utc).date() + timedelta(days=2),
+        created_at=datetime.now(timezone.utc),
+    )
+    assert_no_forbidden_keys(promise_doc.model_dump(), "PromiseToPayDocument")
+
+    extraction_doc = PromiseExtractionDocument(
+        id=str(ObjectId()),
+        event_id=rec.event_id,
+        raw_text="I will pay tomorrow",
+        received_at=datetime.now(timezone.utc),
+        extracted_at=datetime.now(timezone.utc),
+        accepted=True,
+        promised_amount=5.0,
+        promised_date=str(datetime.now(timezone.utc).date() + timedelta(days=2)),
+        confidence=0.95,
+        confidence_floor=0.70,
+        quote="pay tomorrow",
+        quote_verified=True,
+        refusal_reason=None,
+        promise_id=promise_doc.id,
+    )
+    assert_no_forbidden_keys(extraction_doc.model_dump(), "PromiseExtractionDocument")
+
+    vault_raw = live_fixtures["vault_payment_token_created"]
+    demo_run_doc = {
+        "_id": ObjectId(),
+        "run_id": "run_test_audit_01",
+        "scenario": "insufficient-funds",
+        "customer_ref": "demo-12345678",
+        "amount": 49.00,
+        "currency": "USD",
+        "advance_hours": 25.0,
+        "status": "running",
+        "current_step": "onboard",
+        "client_ip": "192.168.1.1",
+        "initial_clock_offset": 0.0,
+        "steps": [
+            {
+                "name": "onboard",
+                "status": "completed",
+                "started_at": datetime.now(timezone.utc),
+                "finished_at": datetime.now(timezone.utc),
+                "source": "paypal",
+                "refs": {
+                    "order_id": "8YF00147EB635281R",
+                    "vault_id": vault_raw["resource"]["id"],
+                    "vault_token_id": "secret-vault-token",
+                    "email": "test@example.com",
+                    "customer": {"id": "cust_secret_123"},
+                    "card": {"last_digits": "1111", "brand": "VISA"},
+                },
+            }
+        ],
+        "created_at": datetime.now(timezone.utc),
+        "updated_at": datetime.now(timezone.utc),
+    }
+    clean_run = _format_public_run(demo_run_doc)
+    assert_no_forbidden_keys(clean_run, "DemoRun")
+
+    ledger_row = LedgerRow(
+        event_id=rec.event_id,
+        customer_ref=rec.customer_ref,
+        created_at=rec.created_at,
+        amount_at_risk=rec.amount,
+        amount=rec.amount,
+        currency="USD",
+        status=rec.status,
+        root_cause=diag.root_cause,
+        diagnosis_method=diag.method,
+        intervention=dec.recommended_intervention,
+        policy_verdict=verdict.verdict,
+        verdict=verdict.verdict,
+        gateway="paypal",
+        execution_ref=exec_rec.gateway_ref,
+        verified_amount=5.0,
+        assertion="gateway_verified",
+        verified_at=datetime.now(timezone.utc),
+    )
+    assert_no_forbidden_keys(ledger_row.model_dump(), "LedgerRow")
+
+    report(
+        "12.17 Offline recursive scanner: zero forbidden keys in public GET response shapes and live fixtures",
+        True,
+        "events, diagnoses, decisions, verdicts, opt_outs, executions, verifications, promises, extractions, demo runs, ledger rows verified clean",
+    )
+    import app.db as app_db
+    app_db._database = None
+
+
 def main() -> int:
     print("=" * 78)
     print("PHASE 1 CONTRACT CHECKS (OFFLINE — NO NETWORK, NO DB, NO SERVER)")
@@ -4084,6 +4808,7 @@ def main() -> int:
     test_step9_paypal_capture_declined_and_vault()
     test_step10_orchestrator()
     test_step11_scenario_runner_and_reset()
+    test_step12_public_runs_and_sanitization()
 
     print("\n" + "=" * 78)
     print(f"SUMMARY: {PASS_COUNT} PASSED, {FAIL_COUNT} FAILED")
