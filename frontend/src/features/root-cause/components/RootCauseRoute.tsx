@@ -2,14 +2,16 @@ import React, { Suspense } from 'react';
 import { motion } from 'framer-motion';
 import { useRootCauseQuery } from '../api/getRootCause';
 import { useInterventionQuery } from '../api/getIntervention';
+import { useCurrency } from '@/context/CurrencyContext';
 import { RootCauseSection } from './RootCauseSection';
 import { InterventionFunnelSection } from './InterventionFunnelSection';
 import { RootCauseErrorBoundary } from './RootCauseErrorBoundary';
 import { RootCauseSkeleton } from './RootCauseSkeleton';
 
 const RootCauseContent: React.FC = () => {
-  const { data: rootCauseData } = useRootCauseQuery();
-  const { data: interventionData } = useInterventionQuery();
+  const { currency } = useCurrency();
+  const { data: rootCauseData } = useRootCauseQuery(currency);
+  const { data: interventionData } = useInterventionQuery(currency);
 
   return (
     <motion.div animate={{ opacity: 1, y: 0 }} className="space-y-10 pb-12" initial={{ opacity: 0, y: 8 }} transition={{ duration: 0.22 }}>

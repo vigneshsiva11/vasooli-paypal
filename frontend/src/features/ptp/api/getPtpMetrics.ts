@@ -6,23 +6,31 @@ type PromiseMetrics = components['schemas']['PromiseMetrics'];
 type PromiseToPay = components['schemas']['PromiseToPayDocument'];
 type PromiseExtraction = components['schemas']['PromiseExtractionDocument'];
 
-export const getPtpMetrics = async ({ signal }: { signal?: AbortSignal }) => {
-  return apiClient<PromiseMetrics>('/metrics/promise-to-pay', { signal });
+export const getPtpMetrics = async ({ signal, currency }: { signal?: AbortSignal; currency?: string } = {}) => {
+  const query = currency ? `?currency=${encodeURIComponent(currency)}` : '';
+  return apiClient<PromiseMetrics>(`/metrics/promise-to-pay${query}`, { signal });
 };
 
-export const usePtpMetricsQuery = () => {
+export const usePtpMetricsQuery = (currency?: string) => {
   return useSuspenseQuery({
-    queryKey: ['metrics', 'ptp'],
-    queryFn: ({ signal }) => getPtpMetrics({ signal }),
+    queryKey: ['metrics', 'ptp', currency],
+    queryFn: ({ signal }) => getPtpMetrics({ signal, currency }),
   });
 };
 
 export const getPromises = async ({ signal }: { signal?: AbortSignal }) => apiClient<PromiseToPay[]>('/promises', { signal });
 
-export const usePromisesQuery = () => useSuspenseQuery({
-  queryKey: ['promises'],
-  queryFn: ({ signal }) => getPromises({ signal }),
-});
+export const usePromisesQuery = () =>
+  useSuspenseQuery({
+    queryKey: ['promises'],
+    queryFn: ({ signal }) => getPromises({ signal }),
+  });
 
-export const getPromiseExtractions = async ({ signal }: { signal?: AbortSignal }) => apiClient<PromiseExtraction[]>('/promise-extractions', { signal });
-export const usePromiseExtractionsQuery = () => useSuspenseQuery({ queryKey: ['promise-extractions'], queryFn: ({ signal }) => getPromiseExtractions({ signal }) });
+export const getPromiseExtractions = async ({ signal }: { signal?: AbortSignal }) =>
+  apiClient<PromiseExtraction[]>('/promise-extractions', { signal });
+
+export const usePromiseExtractionsQuery = () =>
+  useSuspenseQuery({
+    queryKey: ['promise-extractions'],
+    queryFn: ({ signal }) => getPromiseExtractions({ signal }),
+  });

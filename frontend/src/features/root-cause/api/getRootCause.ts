@@ -4,13 +4,14 @@ import type { components } from '@/api/schema';
 
 type RootCauseMetrics = components['schemas']['RootCauseMetrics'];
 
-export const getRootCause = async ({ signal }: { signal?: AbortSignal }) => {
-  return apiClient<RootCauseMetrics[]>('/metrics/by-root-cause', { signal });
+export const getRootCause = async ({ signal, currency }: { signal?: AbortSignal; currency?: string } = {}) => {
+  const query = currency ? `?currency=${encodeURIComponent(currency)}` : '';
+  return apiClient<RootCauseMetrics[]>(`/metrics/by-root-cause${query}`, { signal });
 };
 
-export const useRootCauseQuery = () => {
+export const useRootCauseQuery = (currency?: string) => {
   return useSuspenseQuery({
-    queryKey: ['metrics', 'root-cause'],
-    queryFn: ({ signal }) => getRootCause({ signal }),
+    queryKey: ['metrics', 'root-cause', currency],
+    queryFn: ({ signal }) => getRootCause({ signal, currency }),
   });
 };

@@ -54,3 +54,7 @@ Baseline: the original Vasooli repository at tag `razorpay-buildathon-submission
 - Public GET responses sanitized (vault ids, emails, card data, payer ids, raw payloads removed); invoice payer URLs masked.
 - Added a sanitized /ledger endpoint whose totals match /metrics/summary.
 - Added a rate-limited, sandbox-only public run endpoint (off by default) with an exact-path guard exemption and an atomic one-active-run lock proven on real MongoDB.
+
+## 2026-10-28/29: Frontend
+- Mission Control page with replay, AG Grid ledger and audit grids, USD formatting, audit-trail defaults and error messages, 24 frontend tests.
+- Fixed a live 500: a field written by the reconciler was undeclared on the execution read model; added a write/read symmetry test and a public API smoke test.

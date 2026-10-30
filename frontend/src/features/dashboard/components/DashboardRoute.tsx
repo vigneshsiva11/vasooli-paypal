@@ -2,6 +2,7 @@ import React, { Suspense } from 'react';
 import { motion } from 'framer-motion';
 import { ShieldAlert, RefreshCw, BarChart3, AlertTriangle } from 'lucide-react';
 import { useSummaryQuery } from '../api/getSummary';
+import { useCurrency } from '@/context/CurrencyContext';
 import { AnimatedNumber } from './AnimatedNumber';
 import { HeadlineMetric } from './HeadlineMetric';
 import { StatusBreakdown } from './StatusBreakdown';
@@ -11,7 +12,10 @@ import { DashboardErrorBoundary } from './DashboardErrorBoundary';
 import { formatCurrency, formatPercentage } from '@/utils/formatters';
 
 const DashboardContent: React.FC = () => {
-  const { data } = useSummaryQuery();
+  const { currency } = useCurrency();
+  const { data } = useSummaryQuery(currency);
+
+  const formatCurr = (v: number) => formatCurrency(v, currency);
 
   return (
     <div className="space-y-8">
@@ -22,36 +26,36 @@ const DashboardContent: React.FC = () => {
         </p>
       </div>
 
-      <motion.div 
+      <motion.div
         className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6"
         initial="hidden"
         animate="show"
         variants={{
           hidden: {},
           show: {
-            transition: { staggerChildren: 0.1 }
-          }
+            transition: { staggerChildren: 0.1 },
+          },
         }}
       >
         <HeadlineMetric
           title="Revenue at Risk"
           icon={ShieldAlert}
-          value={<AnimatedNumber value={data.total_revenue_at_risk} formatFn={formatCurrency} />}
+          value={<AnimatedNumber value={data.total_revenue_at_risk} formatFn={formatCurr} />}
         />
 
         <HeadlineMetric
           title="Revenue Recovered"
           icon={RefreshCw}
-          value={<AnimatedNumber value={data.total_revenue_recovered} formatFn={formatCurrency} />}
+          value={<AnimatedNumber value={data.total_revenue_recovered} formatFn={formatCurr} />}
         >
           <div className="flex flex-col gap-1 text-xs">
             <div className="flex justify-between items-center text-[var(--color-status-recovered)] font-medium">
               <span>Gateway Verified</span>
-              <span>{formatCurrency(data.gateway_verified_recovered)}</span>
+              <span>{formatCurrency(data.gateway_verified_recovered, currency)}</span>
             </div>
             <div className="flex justify-between items-center text-[var(--color-text-muted)]">
               <span>Manually Asserted</span>
-              <span>{formatCurrency(data.manually_asserted_recovered)}</span>
+              <span>{formatCurrency(data.manually_asserted_recovered, currency)}</span>
             </div>
           </div>
         </HeadlineMetric>
@@ -61,10 +65,12 @@ const DashboardContent: React.FC = () => {
           icon={BarChart3}
           value={<AnimatedNumber value={data.recovery_rate ?? 0} formatFn={formatPercentage} />}
         >
-           <div className="flex justify-between items-center text-xs">
-              <span className="text-[var(--color-text-muted)]">Gateway Verified Rate</span>
-              <span className="font-medium text-[var(--color-status-recovered)]">{formatPercentage(data.recovery_rate_gateway_verified)}</span>
-           </div>
+          <div className="flex justify-between items-center text-xs">
+            <span className="text-[var(--color-text-muted)]">Gateway Verified Rate</span>
+            <span className="font-medium text-[var(--color-status-recovered)]">
+              {formatPercentage(data.recovery_rate_gateway_verified)}
+            </span>
+          </div>
         </HeadlineMetric>
 
         <HeadlineMetric
@@ -77,7 +83,7 @@ const DashboardContent: React.FC = () => {
         </HeadlineMetric>
       </motion.div>
 
-      <motion.div 
+      <motion.div
         className="grid grid-cols-1 md:grid-cols-3 gap-6"
         initial={{ opacity: 0, y: 20 }}
         animate={{ opacity: 1, y: 0 }}
@@ -92,11 +98,11 @@ const DashboardContent: React.FC = () => {
 
         <div className="bg-[var(--color-bg-surface)] rounded-xl border border-gray-100 p-5 flex flex-col justify-between h-24">
           <span className="text-xs font-medium text-[var(--color-text-muted)] uppercase tracking-wide flex justify-between">
-            Non-Recoverable 
+            Non-Recoverable
             <span className="normal-case text-[10px] text-gray-400 bg-gray-200/50 px-1.5 py-0.5 rounded">declined to chase</span>
           </span>
           <span className="text-2xl font-semibold text-[var(--color-primary)]">
-            <AnimatedNumber value={data.non_recoverable_at_risk} formatFn={formatCurrency} />
+            <AnimatedNumber value={data.non_recoverable_at_risk} formatFn={formatCurr} />
           </span>
         </div>
 

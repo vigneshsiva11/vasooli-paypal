@@ -715,6 +715,28 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/ledger": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Public sanitized ledger comparing asserted vs gateway-verified recovery
+         * @description Return one row per event, newest first, limit 200.
+         *
+         *     Sanitized and public. Totals equal /metrics/summary for the same currency.
+         */
+        get: operations["get_ledger_ledger_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/orchestrator/run/{event_id}": {
         parameters: {
             query?: never;
@@ -789,6 +811,139 @@ export interface paths {
         get: operations["get_sim_clock_sim_clock_get"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/demo/reset": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Demo Reset
+         * @description Admin-guarded demo database reset.
+         */
+        post: operations["demo_reset_demo_reset_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/demo/scenarios/insufficient-funds": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Run Insufficient Funds Scenario
+         * @description Initiate the server-side insufficient-funds scenario runner.
+         */
+        post: operations["run_insufficient_funds_scenario_demo_scenarios_insufficient_funds_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/demo/runs/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Demo Run
+         * @description Public GET for a single demo run (ids and amounts only, no secrets).
+         */
+        get: operations["get_demo_run_demo_runs__id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/demo/runs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Demo Runs
+         * @description Public GET for listing recent demo runs (ids and amounts only, no secrets).
+         */
+        get: operations["list_demo_runs_demo_runs_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/demo/client-key": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get derived client key hash and XFF count (admin guarded)
+         * @description Return a short salted hash of the derived client key and XFF count. Never returns the address.
+         */
+        get: operations["get_demo_client_key_demo_client_key_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/demo/public/run": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Trigger a public rate-limited demo run
+         * @description Public scenario runner endpoint.
+         *
+         *     Requirements:
+         *     - Disabled unless PUBLIC_RUNS=true (403).
+         *     - Sandbox only (assert paypal_environment == 'sandbox').
+         *     - Body ignored except amount (10.00 to 100.00 USD, default 49.00).
+         *     - customer_ref always auto-generated 'demo-<8 hex>'.
+         *     - Returns 202 with run_id immediately; runs in background.
+         *     - One active run globally (409 Conflict).
+         *     - At most 3 per hour per client and 10 per hour globally (429).
+         *     - At least 60 seconds between runs globally (429 with Retry-After).
+         *     - Client key is the RIGHTMOST X-Forwarded-For entry (else socket address).
+         *     - Simulated clock offset recorded before run and restored afterwards on success,
+         *       failure, and timeout (no reset ever).
+         */
+        post: operations["run_public_demo_demo_public_run_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1024,7 +1179,7 @@ export interface components {
             reasoning: string;
             /**
              * Excluded Interventions
-             * @description Interventions excluded from consideration (e.g. retries excluded due to missing vault token or advice code).
+             * @description Interventions excluded from consideration (e.g. retries excluded due to missing token or advice code).
              */
             excluded_interventions?: string[] | null;
             /**
@@ -1260,6 +1415,32 @@ export interface components {
              */
             simulated_time: boolean;
             /**
+             * Successful
+             * @description Whether the charge succeeded on the rail (False when capture is DECLINED).
+             * @default true
+             */
+            successful: boolean;
+            /**
+             * Capture Status
+             * @description Capture status returned by the payment gateway (e.g. 'COMPLETED', 'DECLINED').
+             */
+            capture_status?: string | null;
+            /**
+             * Processor Response Code
+             * @description Gateway processor response code on decline (e.g. '5120').
+             */
+            processor_response_code?: string | null;
+            /**
+             * Recovery Outcome
+             * @description Outcome of the recovery attempt (the same allowed values as verification outcomes). None on initial execution.
+             */
+            recovery_outcome?: ("recovered" | "not_recovered" | "expired" | "cancelled") | null;
+            /**
+             * Success
+             * @description Legacy alias for successful. None by default.
+             */
+            success?: boolean | null;
+            /**
              * Id
              * @description MongoDB document id, rendered as a string.
              */
@@ -1347,6 +1528,26 @@ export interface components {
             /** Detail */
             detail?: components["schemas"]["ValidationError"][];
         };
+        /** InsufficientFundsScenarioRequest */
+        InsufficientFundsScenarioRequest: {
+            /**
+             * Customer Ref
+             * @description Customer reference, must start with 'demo-' if provided.
+             */
+            customer_ref?: string | null;
+            /**
+             * Amount
+             * @description Amount in USD, default 49.00, maximum 250.00.
+             * @default 49
+             */
+            amount: number;
+            /**
+             * Advance Hours
+             * @description Hours to advance simulated clock during step 5.
+             * @default 0
+             */
+            advance_hours: number;
+        };
         /**
          * InterventionMetrics
          * @description One row of the intervention-performance table.
@@ -1432,6 +1633,101 @@ export interface components {
              * @description recoveries_gateway_verified / times_executed, as a percentage. The conservative reading of `recovery_rate`, which counts both sources. Structurally 0 for a contact-type intervention — that is what `verifiable: false` means, and it is 'unobservable by the gateway', not 'ineffective'.
              */
             recovery_rate_gateway_verified: number | null;
+        };
+        /**
+         * LedgerRow
+         * @description One row in the verified-vs-asserted ledger.
+         */
+        LedgerRow: {
+            /**
+             * Event Id
+             * @description The unique event identifier.
+             */
+            event_id: string;
+            /**
+             * Customer Ref
+             * @description Merchant customer reference.
+             */
+            customer_ref: string;
+            /**
+             * Created At
+             * Format: date-time
+             * @description Timestamp when event was ingested.
+             */
+            created_at: string;
+            /**
+             * Amount
+             * @description Revenue at risk in major units.
+             */
+            amount: number;
+            /**
+             * Amount At Risk
+             * @description Alias for amount.
+             */
+            amount_at_risk: number;
+            /**
+             * Currency
+             * @description ISO currency code.
+             * @default INR
+             */
+            currency: string;
+            /**
+             * Status
+             * @description Current event lifecycle status.
+             */
+            status: string;
+            /**
+             * Root Cause
+             * @description Diagnosed root cause.
+             */
+            root_cause?: string | null;
+            /**
+             * Diagnosis Method
+             * @description Diagnosis method (rules or llm).
+             */
+            diagnosis_method?: string | null;
+            /**
+             * Intervention
+             * @description Recommended intervention.
+             */
+            intervention?: string | null;
+            /**
+             * Policy Verdict
+             * @description Policy authorization verdict.
+             */
+            policy_verdict?: string | null;
+            /**
+             * Verdict
+             * @description Alias for policy_verdict.
+             */
+            verdict?: string | null;
+            /**
+             * Gateway
+             * @description Payment gateway (razorpay or paypal).
+             * @default razorpay
+             */
+            gateway: string;
+            /**
+             * Execution Ref
+             * @description Gateway or execution reference.
+             */
+            execution_ref?: string | null;
+            /**
+             * Verified Amount
+             * @description Deduplicated recovered amount.
+             * @default 0
+             */
+            verified_amount: number;
+            /**
+             * Assertion
+             * @description gateway_verified or merchant_asserted.
+             */
+            assertion?: string | null;
+            /**
+             * Verified At
+             * @description Verification timestamp.
+             */
+            verified_at?: string | null;
         };
         /**
          * ManualConfirmationAck
@@ -2232,6 +2528,15 @@ export interface components {
              * @description MongoDB document id, rendered as a string.
              */
             id: string;
+        };
+        /** PublicDemoRunRequest */
+        PublicDemoRunRequest: {
+            /**
+             * Amount
+             * @description Amount in USD, 10.00 to 100.00.
+             * @default 49
+             */
+            amount: number;
         };
         /**
          * RevenueEvent
@@ -3635,6 +3940,38 @@ export interface operations {
             };
         };
     };
+    get_ledger_ledger_get: {
+        parameters: {
+            query?: {
+                /** @description Currency filter (e.g. USD, INR) */
+                currency?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LedgerRow"][];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     run_orchestrator_for_event_orchestrator_run__event_id__post: {
         parameters: {
             query?: never;
@@ -3760,6 +4097,175 @@ export interface operations {
                     "application/json": {
                         [key: string]: unknown;
                     };
+                };
+            };
+        };
+    };
+    demo_reset_demo_reset_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+        };
+    };
+    run_insufficient_funds_scenario_demo_scenarios_insufficient_funds_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["InsufficientFundsScenarioRequest"] | null;
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_demo_run_demo_runs__id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_demo_runs_demo_runs_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+        };
+    };
+    get_demo_client_key_demo_client_key_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+        };
+    };
+    run_public_demo_demo_public_run_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["PublicDemoRunRequest"] | null;
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };
