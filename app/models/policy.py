@@ -475,6 +475,12 @@ class CustomerOptOut(BaseModel):
         description="When the opt-out was recorded (UTC).",
     )
 
+    @classmethod
+    def from_document(cls, document: dict[str, Any]) -> "CustomerOptOut":
+        """Build an opt-out record from a raw MongoDB document."""
+        fields = {k: v for k, v in document.items() if k != "_id"}
+        return cls(**fields)
+
 
 class OptOutRequest(BaseModel):
     """Optional body for `POST /opt-out/{customer_ref}`."""

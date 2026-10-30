@@ -9,6 +9,10 @@ recommendation. Authorization is Stage 4 and lives behind its own surface.
 
 from __future__ import annotations
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from app import decision as decision_stage
@@ -98,4 +102,15 @@ async def list_decisions(
 ) -> list[DecisionRecord]:
     """Return stored decisions, newest first."""
     documents = await decision_stage.list_decisions(event_id=event_id, history=history)
-    return [DecisionRecord.from_document(document) for document in documents]
+    records: list[DecisionRecord] = []
+    for document in documents:
+        try:
+            records.append(DecisionRecord.from_document(document))
+        except Exception as exc:
+            ev_id = document.get("event_id") or str(document.get("_id", "unknown"))
+            logger.warning(
+                "Skipping invalid document in decisions: event_id=%s, error_type=%s",
+                ev_id,
+                type(exc).__name__,
+            )
+    return records

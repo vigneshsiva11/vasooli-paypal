@@ -11,6 +11,10 @@ open, but approving on a human's behalf is not something this stage invents.
 
 from __future__ import annotations
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
 
 from app import decision as decision_stage
@@ -137,7 +141,18 @@ async def list_policy_verdicts(
     documents = await policy_stage.list_verdicts(
         event_id=event_id, history=history, verdict=verdict
     )
-    return [PolicyVerdictRecord.from_document(document) for document in documents]
+    records: list[PolicyVerdictRecord] = []
+    for document in documents:
+        try:
+            records.append(PolicyVerdictRecord.from_document(document))
+        except Exception as exc:
+            ev_id = document.get("event_id") or str(document.get("_id", "unknown"))
+            logger.warning(
+                "Skipping invalid document in policy_verdicts: event_id=%s, error_type=%s",
+                ev_id,
+                type(exc).__name__,
+            )
+    return records
 
 
 @router.post(
@@ -183,7 +198,15 @@ async def opt_out_customer(
 )
 async def list_opted_out_customers() -> list[CustomerOptOut]:
     """Return every customer on the do-not-contact list, most recent first."""
-    return [
-        CustomerOptOut.model_validate(record)
-        for record in await policy_stage.list_opt_outs()
-    ]
+    records: list[CustomerOptOut] = []
+    for record in await policy_stage.list_opt_outs():
+        try:
+            records.append(CustomerOptOut.model_validate(record))
+        except Exception as exc:
+            ev_id = record.get("customer_ref") or str(record.get("_id", "unknown"))
+            logger.warning(
+                "Skipping invalid document in opt_outs: event_id=%s, error_type=%s",
+                ev_id,
+                type(exc).__name__,
+            )
+    return records

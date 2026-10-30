@@ -6,6 +6,10 @@ Runs diagnosis on a stored event and reads diagnoses back. Writes only to the
 
 from __future__ import annotations
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from app import diagnosis as diagnosis_stage
@@ -74,4 +78,15 @@ async def list_diagnoses(
 ) -> list[DiagnosisRecord]:
     """Return stored diagnoses, newest first, across all versions."""
     documents = await diagnosis_stage.list_diagnoses(event_id=event_id)
-    return [DiagnosisRecord.from_document(document) for document in documents]
+    records: list[DiagnosisRecord] = []
+    for document in documents:
+        try:
+            records.append(DiagnosisRecord.from_document(document))
+        except Exception as exc:
+            ev_id = document.get("event_id") or str(document.get("_id", "unknown"))
+            logger.warning(
+                "Skipping invalid document in diagnoses: event_id=%s, error_type=%s",
+                ev_id,
+                type(exc).__name__,
+            )
+    return records

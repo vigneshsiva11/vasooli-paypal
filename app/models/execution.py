@@ -31,6 +31,7 @@ from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_vali
 
 from app.models.decision import NO_ACTION_INTERVENTIONS, InterventionName
 from app.models.policy import PolicyVerdictRecord
+from app.models.verification import VerificationOutcome
 
 _OBJECT_ID_PATTERN = r"^[0-9a-fA-F]{24}$"
 
@@ -307,6 +308,14 @@ class ExecutionRecord(BaseModel):
         default=None,
         description="Gateway processor response code on decline (e.g. '5120').",
     )
+    recovery_outcome: VerificationOutcome | None = Field(
+        default=None,
+        description="Outcome of the recovery attempt (the same allowed values as verification outcomes). None on initial execution.",
+    )
+    success: bool | None = Field(
+        default=None,
+        description="Legacy alias for successful. None by default.",
+    )
 
     @model_validator(mode="after")
     def _intervention_must_be_executable(self) -> "ExecutionRecord":
@@ -453,4 +462,6 @@ class ExecutionRecordDocument(ExecutionRecord):
         fields = {key: value for key, value in document.items() if key != "_id"}
         if "gateway_url" in fields and fields["gateway_url"]:
             fields["gateway_url"] = mask_invoice_payer_url(fields["gateway_url"])
+        if "executed_at" in fields and isinstance(fields["executed_at"], datetime) and fields["executed_at"].tzinfo is None:
+            fields["executed_at"] = fields["executed_at"].replace(tzinfo=timezone.utc)
         return cls(id=str(document["_id"]), **fields)

@@ -6,6 +6,10 @@ The ledger's totals equal /metrics/summary for the same currency.
 
 from __future__ import annotations
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 from datetime import datetime
 from typing import Any
 from fastapi import APIRouter, Depends, Query
@@ -88,48 +92,56 @@ async def get_ledger(
     )
 
     for event in sorted_events[:200]:
-        event_id = event["event_id"]
-        diag = latest_diagnoses.get(event_id)
-        dec = latest_decisions.get(event_id)
-        ver = latest_verdicts.get(event_id)
-        exe = latest_executions.get(event_id)
-        ev_survivors = survivors_by_event.get(event_id, [])
+        try:
+            event_id = event["event_id"]
+            diag = latest_diagnoses.get(event_id)
+            dec = latest_decisions.get(event_id)
+            ver = latest_verdicts.get(event_id)
+            exe = latest_executions.get(event_id)
+            ev_survivors = survivors_by_event.get(event_id, [])
 
-        verified_amt = money(sum(s.get("amount_recovered", 0.0) for s in ev_survivors))
-        assertion = assertion_of(ev_survivors[0]) if ev_survivors and verified_amt > 0 else None
-        verified_time = (
-            max(s.get("verified_at") for s in ev_survivors if s.get("verified_at"))
-            if ev_survivors and verified_amt > 0
-            else None
-        )
+            verified_amt = money(sum(s.get("amount_recovered", 0.0) for s in ev_survivors))
+            assertion = assertion_of(ev_survivors[0]) if ev_survivors and verified_amt > 0 else None
+            verified_time = (
+                max(s.get("verified_at") for s in ev_survivors if s.get("verified_at"))
+                if ev_survivors and verified_amt > 0
+                else None
+            )
 
-        exec_ref = None
-        if exe:
-            exec_ref = exe.get("gateway_ref") or exe.get("razorpay_payment_link_id") or str(exe.get("_id"))
+            exec_ref = None
+            if exe:
+                exec_ref = exe.get("gateway_ref") or exe.get("razorpay_payment_link_id") or str(exe.get("_id"))
 
-        amt = money(event.get("amount", 0.0))
-        verdict_val = ver.get("verdict") if ver else None
+            amt = money(event.get("amount", 0.0))
+            verdict_val = ver.get("verdict") if ver else None
 
-        row = LedgerRow(
-            event_id=event_id,
-            customer_ref=event.get("customer_ref", ""),
-            created_at=event.get("created_at"),
-            amount=amt,
-            amount_at_risk=amt,
-            currency=event.get("currency", curr),
-            status=event.get("status", "at_risk"),
-            root_cause=diag.get("root_cause") if diag else None,
-            diagnosis_method=diag.get("method") if diag else None,
-            intervention=dec.get("intervention") if dec else None,
-            policy_verdict=verdict_val,
-            verdict=verdict_val,
-            gateway=event.get("gateway", "razorpay"),
-            execution_ref=exec_ref,
-            verified_amount=verified_amt,
-            assertion=assertion,
-            verified_at=verified_time,
-        )
-        rows.append(row)
+            row = LedgerRow(
+                event_id=event_id,
+                customer_ref=event.get("customer_ref", ""),
+                created_at=event.get("created_at"),
+                amount=amt,
+                amount_at_risk=amt,
+                currency=event.get("currency", curr),
+                status=event.get("status", "at_risk"),
+                root_cause=diag.get("root_cause") if diag else None,
+                diagnosis_method=diag.get("method") if diag else None,
+                intervention=dec.get("intervention") if dec else None,
+                policy_verdict=verdict_val,
+                verdict=verdict_val,
+                gateway=event.get("gateway", "razorpay"),
+                execution_ref=exec_ref,
+                verified_amount=verified_amt,
+                assertion=assertion,
+                verified_at=verified_time,
+            )
+            rows.append(row)
+        except Exception as exc:
+            ev_id = event.get("event_id") or "unknown"
+            logger.warning(
+                "Skipping invalid row in ledger: event_id=%s, error_type=%s",
+                ev_id,
+                type(exc).__name__,
+            )
 
     # Sanitize rows to ensure no forbidden credential keys
     sanitized = [LedgerRow(**sanitize_public_dict(r.model_dump())) for r in rows]

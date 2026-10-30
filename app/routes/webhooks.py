@@ -168,4 +168,15 @@ async def list_verification_records(
     documents = await store.list_verifications(
         event_id=event_id, history=history, outcome=outcome, source=source
     )
-    return [verification_document(document) for document in documents]
+    records: list[VerificationRecordDocument] = []
+    for document in documents:
+        try:
+            records.append(verification_document(document))
+        except Exception as exc:
+            ev_id = document.get("event_id") or str(document.get("_id", "unknown"))
+            logger.warning(
+                "Skipping invalid document in verifications: event_id=%s, error_type=%s",
+                ev_id,
+                type(exc).__name__,
+            )
+    return records

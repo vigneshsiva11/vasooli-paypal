@@ -30,6 +30,10 @@ not having real verification — and everything it writes is labelled
 
 from __future__ import annotations
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 
 from app import execution as execution_stage
@@ -258,9 +262,17 @@ async def list_execution_records(
     documents = await execution_stage.list_executions(
         event_id=event_id, history=history, status=execution_status
     )
-    records = [
-        ExecutionRecordDocument.from_document(document) for document in documents
-    ]
+    records: list[ExecutionRecordDocument] = []
+    for document in documents:
+        try:
+            records.append(ExecutionRecordDocument.from_document(document))
+        except Exception as exc:
+            ev_id = document.get("event_id") or str(document.get("_id", "unknown"))
+            logger.warning(
+                "Skipping invalid document in executions: event_id=%s, error_type=%s",
+                ev_id,
+                type(exc).__name__,
+            )
     if action_type is not None:
         # Filtered after the latest-per-event grouping rather than inside it, on
         # purpose: filtering first would promote an older execution to "latest" and

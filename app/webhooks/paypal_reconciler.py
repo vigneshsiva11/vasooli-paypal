@@ -212,7 +212,7 @@ async def reconcile_paypal_event(
             if execution:
                 await db.executions.update_one(
                     {"_id": execution["_id"]},
-                    {"$set": {"successful": False, "success": False, "recovery_outcome": "not_recovered"}},
+                    {"$set": {"successful": False, "recovery_outcome": "not_recovered"}},
                 )
 
                 amount_expected = await _resolve_expected_amount(execution, db)

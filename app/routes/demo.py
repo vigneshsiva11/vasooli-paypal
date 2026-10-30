@@ -832,7 +832,19 @@ async def get_demo_run(id: str) -> dict[str, Any]:
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Demo run {id!r} not found",
         )
-    return _format_public_run(doc)
+    try:
+        return _format_public_run(doc)
+    except Exception as exc:
+        run_id = doc.get("run_id") or str(doc.get("_id", "unknown"))
+        logger.warning(
+            "Skipping invalid demo run: event_id=%s, error_type=%s",
+            run_id,
+            type(exc).__name__,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Demo run {id!r} not found",
+        )
 
 
 @router.get("/runs")
@@ -841,10 +853,17 @@ async def list_demo_runs() -> dict[str, Any]:
     db = get_database()
     await self_heal_stale_runs(db)
     cursor = db.demo_runs.find().sort("created_at", -1).limit(50)
-    runs = [
-        _format_public_run(doc)
-        async for doc in cursor
-    ]
+    runs = []
+    async for doc in cursor:
+        try:
+            runs.append(_format_public_run(doc))
+        except Exception as exc:
+            run_id = doc.get("run_id") or str(doc.get("_id", "unknown"))
+            logger.warning(
+                "Skipping invalid demo run: event_id=%s, error_type=%s",
+                run_id,
+                type(exc).__name__,
+            )
     return {"runs": runs, "total": len(runs)}
 
 

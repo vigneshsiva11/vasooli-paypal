@@ -50,6 +50,17 @@ from app.metrics.reader import (
 )
 from app.models import RevenueEvent
 from app.models.diagnosis import PaymentRootCause
+from app.models.events import RevenueEventRecord
+from app.models.diagnosis import DiagnosisRecord
+from app.models.decision import DecisionRecord
+from app.models.policy import PolicyVerdictRecord, CustomerOptOut
+from app.models.execution import ExecutionRecordDocument
+from app.models.verification import verification_document
+from app.models.promise import PromiseToPayDocument
+from app.models.promise_extraction import PromiseExtractionDocument
+from app.models.vault import CustomerVaultToken
+from app.models.charge_attempt import ChargeAttempt
+from app.sanitizer import assert_no_forbidden_keys
 from app.webhooks import ensure_indexes as ensure_webhook_indexes
 from app.webhooks.paypal_reconciler import (
     reconcile_paypal_event,
@@ -84,7 +95,7 @@ async def run_integration_check() -> int:
     print("PAYPAL RECONCILIATION INTEGRATION CHECK (REAL MONGODB: vasooli_regress)")
     print("=" * 78)
 
-    client = AsyncIOMotorClient(settings.mongodb_uri)
+    client = AsyncIOMotorClient(settings.mongodb_uri, tz_aware=True)
     db = client[target_db]
 
     try:
@@ -784,6 +795,76 @@ async def run_integration_check() -> int:
         assert single_run_view.get("run_id") == scenario_run_id
         assert single_run_view.get("amount") == 49.00
         assert "_id" not in single_run_view
+
+        # Resolve scenario event id
+        scenario_event_id = None
+        for s in run_doc_after.get("steps", []):
+            if s.get("refs") and "event_id" in s["refs"]:
+                scenario_event_id = s["refs"]["event_id"]
+                break
+
+        # --- 19. Symmetry Test: Load EVERY document of EVERY model-backed collection through strict read model ---
+        model_backed_checks = [
+            ("events", db.events, RevenueEventRecord.from_document),
+            ("diagnoses", db.diagnoses, DiagnosisRecord.from_document),
+            ("decisions", db.decisions, DecisionRecord.from_document),
+            ("policy_verdicts", db.policy_verdicts, PolicyVerdictRecord.from_document),
+            ("opt_outs", db.opt_outs, CustomerOptOut.from_document),
+            ("executions", db.executions, ExecutionRecordDocument.from_document),
+            ("verifications", db.verifications, verification_document),
+            ("promises", db.promises, PromiseToPayDocument.from_document),
+            ("promise_extractions", db.promise_extractions, PromiseExtractionDocument.from_document),
+            ("customer_vault", db.customer_vault, CustomerVaultToken.from_document),
+            ("charge_attempts", db.charge_attempts, ChargeAttempt.from_document),
+        ]
+        total_docs_validated = 0
+        for col_name, col_handle, parse_fn in model_backed_checks:
+            col_count = 0
+            async for doc in col_handle.find():
+                try:
+                    parse_fn(doc)
+                    col_count += 1
+                except Exception as exc:
+                    raise AssertionError(
+                        f"Read model validation failed for collection {col_name!r} doc {doc.get('_id')}: {exc}"
+                    ) from exc
+            total_docs_validated += col_count
+        assert total_docs_validated > 0, "No documents were validated across collections"
+        print(f"  [PASS] Symmetry test: validated all {total_docs_validated} documents across 11 model-backed collections through strict read models")
+
+        # --- Scenario-level Smoke Test of EVERY public GET endpoint ---
+        from app.main import app as fastapi_app
+
+        smoke_endpoints = [
+            "/events",
+            "/diagnoses",
+            "/decisions",
+            "/policy-verdicts",
+            "/executions",
+            "/verifications",
+            "/promises",
+            "/promise-extractions",
+            "/opt-outs",
+            "/ledger",
+            "/demo/runs",
+            f"/demo/runs/{scenario_run_id}",
+            "/metrics/summary",
+            "/metrics/by-root-cause",
+            "/metrics/by-intervention",
+            "/metrics/promise-to-pay",
+            "/metrics/baseline-comparison",
+        ]
+        if scenario_event_id:
+            smoke_endpoints.append(f"/audit-trail/{scenario_event_id}")
+
+        transport = httpx.ASGITransport(app=fastapi_app, raise_app_exceptions=False)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as smoke_client:
+            for ep in smoke_endpoints:
+                resp = await smoke_client.get(ep)
+                assert resp.status_code == 200, f"Smoke test failed on {ep}: HTTP {resp.status_code} ({resp.text})"
+                body = resp.json()
+                assert_no_forbidden_keys(body, path=ep)
+        print(f"  [PASS] Scenario smoke test: requested {len(smoke_endpoints)} public GET endpoints (all 200 OK, valid JSON, zero forbidden keys)")
 
         # Clean up scenario runner test records so subsequent metrics or queries remain isolated
         await db.events.delete_many({"customer_ref": "demo-integ-test"})

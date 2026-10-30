@@ -21,6 +21,10 @@ Three things are added, all of them renderings of stored data:
 
 from __future__ import annotations
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 from app.metrics.reader import Snapshot, distinct_recoveries, money
 from app.models.decision import DecisionRecord
 from app.models.diagnosis import DiagnosisRecord
@@ -65,13 +69,81 @@ def assemble(snapshot: Snapshot, event_id: str) -> AuditTrail:
             "would not be a single history."
         )
 
-    event = RevenueEventRecord.from_document(snapshot.events[0])
-    diagnoses = [DiagnosisRecord.from_document(d) for d in snapshot.diagnoses]
-    decisions = [DecisionRecord.from_document(d) for d in snapshot.decisions]
-    verdicts = [PolicyVerdictRecord.from_document(d) for d in snapshot.verdicts]
-    executions = [ExecutionRecordDocument.from_document(d) for d in snapshot.executions]
-    verifications = [verification_document(d) for d in snapshot.verifications]
-    promises = [PromiseToPayDocument.from_document(d) for d in snapshot.promises]
+    try:
+        event = RevenueEventRecord.from_document(snapshot.events[0])
+    except Exception as exc:
+        logger.warning(
+            "Skipping invalid root event: event_id=%s, error_type=%s",
+            event_id,
+            type(exc).__name__,
+        )
+        raise EventNotFound(f"Event {event_id!r} could not be loaded as a valid record") from exc
+
+    diagnoses: list[DiagnosisRecord] = []
+    for d in snapshot.diagnoses:
+        try:
+            diagnoses.append(DiagnosisRecord.from_document(d))
+        except Exception as exc:
+            logger.warning(
+                "Skipping invalid diagnosis: event_id=%s, error_type=%s",
+                event_id,
+                type(exc).__name__,
+            )
+
+    decisions: list[DecisionRecord] = []
+    for d in snapshot.decisions:
+        try:
+            decisions.append(DecisionRecord.from_document(d))
+        except Exception as exc:
+            logger.warning(
+                "Skipping invalid decision: event_id=%s, error_type=%s",
+                event_id,
+                type(exc).__name__,
+            )
+
+    verdicts: list[PolicyVerdictRecord] = []
+    for d in snapshot.verdicts:
+        try:
+            verdicts.append(PolicyVerdictRecord.from_document(d))
+        except Exception as exc:
+            logger.warning(
+                "Skipping invalid verdict: event_id=%s, error_type=%s",
+                event_id,
+                type(exc).__name__,
+            )
+
+    executions: list[ExecutionRecordDocument] = []
+    for d in snapshot.executions:
+        try:
+            executions.append(ExecutionRecordDocument.from_document(d))
+        except Exception as exc:
+            logger.warning(
+                "Skipping invalid execution: event_id=%s, error_type=%s",
+                event_id,
+                type(exc).__name__,
+            )
+
+    verifications: list[VerificationRecordDocument] = []
+    for d in snapshot.verifications:
+        try:
+            verifications.append(verification_document(d))
+        except Exception as exc:
+            logger.warning(
+                "Skipping invalid verification: event_id=%s, error_type=%s",
+                event_id,
+                type(exc).__name__,
+            )
+
+    promises: list[PromiseToPayDocument] = []
+    for d in snapshot.promises:
+        try:
+            promises.append(PromiseToPayDocument.from_document(d))
+        except Exception as exc:
+            logger.warning(
+                "Skipping invalid promise: event_id=%s, error_type=%s",
+                event_id,
+                type(exc).__name__,
+            )
 
     # --- the merged timeline -------------------------------------------------
 

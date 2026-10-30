@@ -6,6 +6,10 @@ else: no diagnosis, no scoring, no side effects beyond the write.
 
 from __future__ import annotations
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 
 from app import ingestion
@@ -59,6 +63,9 @@ async def create_event(event: RevenueEvent, response: Response) -> EventCreatedR
     return EventCreatedResponse(id=document_id, event_id=event.event_id)
 
 
+logger = logging.getLogger(__name__)
+
+
 @router.get(
     "",
     response_model=list[RevenueEventRecord],
@@ -67,4 +74,15 @@ async def create_event(event: RevenueEvent, response: Response) -> EventCreatedR
 async def list_events() -> list[RevenueEventRecord]:
     """Return every stored event, newest first."""
     documents = await ingestion.list_events()
-    return [RevenueEventRecord.from_document(document) for document in documents]
+    records: list[RevenueEventRecord] = []
+    for document in documents:
+        try:
+            records.append(RevenueEventRecord.from_document(document))
+        except Exception as exc:
+            ev_id = document.get("event_id") or str(document.get("_id", "unknown"))
+            logger.warning(
+                "Skipping invalid document in events: event_id=%s, error_type=%s",
+                ev_id,
+                type(exc).__name__,
+            )
+    return records

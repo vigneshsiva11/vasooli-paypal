@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -49,3 +49,9 @@ class ChargeAttempt(BaseModel):
         default_factory=_utc_now,
         description="When the attempt was recorded (UTC).",
     )
+
+    @classmethod
+    def from_document(cls, document: dict[str, Any]) -> "ChargeAttempt":
+        """Build a charge attempt record from a raw MongoDB document."""
+        fields = {k: v for k, v in document.items() if k != "_id"}
+        return cls(**fields)

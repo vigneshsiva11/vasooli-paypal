@@ -31,6 +31,10 @@ it, because the payment re-check lives inside the function and not in its caller
 
 from __future__ import annotations
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 
 from app import ptp
@@ -212,7 +216,18 @@ async def list_promises(
         )
 
     documents = await ptp.list_promises(event_id=event_id, history=history, state=state)
-    return [ptp.as_record(document) for document in documents]
+    records: list[PromiseToPayDocument] = []
+    for document in documents:
+        try:
+            records.append(ptp.as_record(document))
+        except Exception as exc:
+            ev_id = document.get("event_id") or str(document.get("_id", "unknown"))
+            logger.warning(
+                "Skipping invalid document in promises: event_id=%s, error_type=%s",
+                ev_id,
+                type(exc).__name__,
+            )
+    return records
 
 
 @router.get(
@@ -241,7 +256,18 @@ async def list_promise_extractions(
     the two refusals before it.
     """
     documents = await ptp.list_extractions(event_id=event_id, accepted=accepted)
-    return [PromiseExtractionDocument.from_document(document) for document in documents]
+    records: list[PromiseExtractionDocument] = []
+    for document in documents:
+        try:
+            records.append(PromiseExtractionDocument.from_document(document))
+        except Exception as exc:
+            ev_id = document.get("event_id") or str(document.get("_id", "unknown"))
+            logger.warning(
+                "Skipping invalid document in promise_extractions: event_id=%s, error_type=%s",
+                ev_id,
+                type(exc).__name__,
+            )
+    return records
 
 
 @router.post(
