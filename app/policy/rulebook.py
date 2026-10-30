@@ -127,6 +127,8 @@ class Rulebook:
     fx_rate_inr_per_usd: float | None = field(default=None)
     intervention_costs: tuple[tuple[str, float], ...] | None = field(default=None)
     do_not_retry_response_codes: tuple[str, ...] | None = field(default=None)
+    max_retries_per_event: int | None = field(default=None)
+    retry_cooldown_hours: int | None = field(default=None)
 
     #: Human note on what this rulebook was and when. Documentation only —
     #: excluded from the fingerprint, so rewording an archive entry cannot change

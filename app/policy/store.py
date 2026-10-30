@@ -107,6 +107,8 @@ async def ensure_indexes() -> None:
         unique=True,
         name=OPT_OUT_INDEX,
     )
+    from app.policy.rulebook_store import ensure_rulebook_indexes
+    await ensure_rulebook_indexes()
     logger.info(
         "Ensured indexes %r/%r on %s and %r on %s",
         VERSION_INDEX,

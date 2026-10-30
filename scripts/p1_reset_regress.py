@@ -65,6 +65,11 @@ async def reset_regress_db() -> int:
             await ensure_charge_indexes()
             await ensure_vault_indexes()
             await ensure_orchestrator_indexes()
+            from app.policy.rulebook_store import ensure_rulebook_indexes, invalidate_usd_cache
+            from app.policy.gemini_rules import clear_preview_cache
+            invalidate_usd_cache()
+            clear_preview_cache()
+            await ensure_rulebook_indexes()
             print("Successfully initialized indexes on vasooli_regress.")
         finally:
             await close_mongo_connection()

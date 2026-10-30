@@ -38,6 +38,7 @@ from app.routes import (
     paypal_webhooks,
     policy,
     promises,
+    rules,
     sim,
     webhooks,
 )
@@ -87,6 +88,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             # fact that can only be true once.
             await ensure_extraction_indexes()
             await demo.ensure_demo_run_indexes()
+            from app.policy.rulebook_store import ensure_rulebook_indexes, get_active_usd_rulebook, RULEBOOK_VERSIONS_COLLECTION
+            from app.db import get_database
+            await ensure_rulebook_indexes()
+            active_book = await get_active_usd_rulebook()
+            db = get_database()
+            active_doc = None
+            if db is not None:
+                active_doc = await db[RULEBOOK_VERSIONS_COLLECTION].find_one({"currency": "USD", "is_active": True})
+            provenance = "database" if active_doc else "code_baseline"
+            logger.info("active USD rulebook: %s (%s)", active_book.fingerprint, provenance)
         except Exception:  # noqa: BLE001 - reported separately from connection failure
             logger.exception(
                 "Failed to ensure MongoDB indexes; uniqueness is NOT enforced"
@@ -135,6 +146,7 @@ app.include_router(webhooks.router)
 # PayPal webhook receiver — Phase 2. Same no-database-ready pattern.
 app.include_router(paypal_webhooks.paypal_webhook_router)
 app.include_router(promises.router)
+app.include_router(rules.router)
 # Stage 7. Read-only: this router declares GET routes and nothing else, and calls
 # no index-ensuring function above because it creates no collection of its own.
 app.include_router(metrics.router)

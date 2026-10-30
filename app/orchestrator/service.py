@@ -194,7 +194,12 @@ async def advance(
         {"decision_id": str(dec_doc["_id"])}
     )
     if verdict_doc is None:
-        rulebook = current_rulebook(event_doc.get("currency") or "USD")
+        curr = (event_doc.get("currency") or "USD").upper()
+        if curr == "USD":
+            from app.policy.rulebook_store import get_active_usd_rulebook
+            rulebook = await get_active_usd_rulebook(database)
+        else:
+            rulebook = current_rulebook(curr)
         context = await gather_context(
             decision=dec_record,
             customer_ref=event_doc.get("customer_ref", ""),

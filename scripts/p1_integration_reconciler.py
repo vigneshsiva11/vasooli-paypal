@@ -28,11 +28,12 @@ import httpx
 from bson import ObjectId
 from motor.motor_asyncio import AsyncIOMotorClient
 from pymongo.errors import DuplicateKeyError
+from unittest.mock import AsyncMock, patch
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from app.config import get_settings
+from app.config import Settings, get_settings
 from app.diagnosis.rules import classify
 from app.gateways.paypal.charge_attempts import (
     ensure_indexes as ensure_charge_indexes,
@@ -1117,12 +1118,233 @@ async def run_integration_check() -> int:
                     assert "Global rate limit exceeded" in r.json().get("detail", "")
                 print("  [PASS] Global hourly limit (10/hr) holds across parallel requests (429 with Retry-After)")
 
+        # -------------------------------------------------------------------
+        # 16. DYNAMIC POLICY RULEBOOK & RE-DERIVATION CHECKS (REAL MONGODB)
+        # -------------------------------------------------------------------
+        from app.policy.rulebook_store import (
+            ensure_rulebook_indexes,
+            revert_usd_rulebook,
+            apply_new_usd_rulebook,
+            get_active_usd_rulebook,
+            resolve_rulebook,
+        )
+        from app.policy.gemini_rules import parse_and_preview_rules
+        from app.policy.engine import PolicyContext, evaluate
+        from app.routes.demo import reset_demo_database
+
+        await ensure_rulebook_indexes(db)
+
+        # 16.1 Revert to baseline
+        await revert_usd_rulebook(db)
+        base_book = await get_active_usd_rulebook(db)
+        assert base_book.fingerprint == "rb1_8221b1b9069ffc80"
+        print("  [PASS] Dynamic rulebook: revert to baseline restores code baseline rb1_8221b1b9069ffc80")
+
+        # 16.2 Active rulebook changes verdict and revert restores it
+        chip = "contact at most twice, wait 48 hours between contacts, auto authorize below $50, ask me before anything over $100"
+        preview = await parse_and_preview_rules(chip, active_rulebook=base_book)
+        assert preview["valid"] is True
+        dec_rules = DecisionRecord(
+            id=str(ObjectId()),
+            version=1,
+            event_id="test_evt_rules_1",
+            diagnosis_id=str(ObjectId()),
+            diagnosis_version=1,
+            recommended_intervention="recovery_payment_link",
+            estimated_cost=0.06,
+            recovery_probability=0.2,
+            revenue_at_risk=180.0,
+            expected_recovery_value=35.94,
+            reasoning="Test decision",
+            decided_at=datetime.now(timezone.utc),
+        )
+        ctx_rules = PolicyContext(
+            customer_ref="cust_rules_1",
+            customer_opted_out=False,
+            prior_authorized_contacts=0,
+            last_authorized_contact_at=None,
+        )
+        v_base = evaluate(decision=dec_rules, context=ctx_rules, rulebook=base_book)
+        assert v_base.verdict == "authorized"
+
+        applied = await apply_new_usd_rulebook(
+            preview=preview,
+            expected_parent_fingerprint=base_book.fingerprint,
+            db=db,
+        )
+        new_book = await get_active_usd_rulebook(db)
+        assert new_book.fingerprint == applied["fingerprint"]
+
+        v_new = evaluate(decision=dec_rules, context=ctx_rules, rulebook=new_book)
+        assert v_new.verdict == "requires_manual_review"
+        assert v_new.reason == "amount_never_auto"
+
+        await revert_usd_rulebook(db)
+        restored_book = await get_active_usd_rulebook(db)
+        assert restored_book.fingerprint == "rb1_8221b1b9069ffc80"
+        v_restored = evaluate(decision=dec_rules, context=ctx_rules, rulebook=restored_book)
+        assert v_restored.verdict == "authorized"
+        assert v_restored.reason == "ok"
+        print("  [PASS] Dynamic rulebook: active rulebook changes real policy verdict & revert restores it")
+
+        # 16.3 Concurrency guard: two concurrent applies, first wins, second receives 409
+        active_now = await get_active_usd_rulebook(db)
+        preview_a = await parse_and_preview_rules("contact at most twice, wait 48 hours between contacts", active_rulebook=active_now)
+        preview_b = await parse_and_preview_rules("contact at most 4 times, wait 12 hours between contacts", active_rulebook=active_now)
+        res_a = await apply_new_usd_rulebook(
+            preview=preview_a,
+            expected_parent_fingerprint=active_now.fingerprint,
+            db=db,
+        )
+        conflict_caught = False
+        try:
+            await apply_new_usd_rulebook(
+                preview=preview_b,
+                expected_parent_fingerprint=active_now.fingerprint,  # Stale parent
+                db=db,
+            )
+        except RuntimeError:
+            conflict_caught = True
+        assert conflict_caught is True
+        print("  [PASS] Dynamic rulebook: concurrency guard (first wins, second receives 409 Conflict)")
+
+        # 16.4 Rules rate limits on real MongoDB (5/hr per client IP)
+        transport = httpx.ASGITransport(app=fastapi_app, raise_app_exceptions=False)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as test_client:
+            test_ip = "203.0.113.50"
+            await db.rules_rate_limits.delete_many({"client_ip": test_ip})
+            for _ in range(5):
+                await db.rules_rate_limits.insert_one({"client_ip": test_ip, "created_at": datetime.now(timezone.utc)})
+            r_lim = await test_client.post(
+                "/rules/preview",
+                json={"text": "contact at most twice, wait 48 hours between contacts"},
+                headers={"X-Forwarded-For": test_ip},
+            )
+            assert r_lim.status_code == 429, f"expected 429, got {r_lim.status_code}"
+            assert "Retry-After" in r_lim.headers
+            assert "Client rate limit exceeded" in r_lim.json().get("detail", "")
+            await db.rules_rate_limits.delete_many({"client_ip": test_ip})
+        print("  [PASS] Dynamic rulebook: rate limits on real MongoDB (5/hr per client IP returns 429)")
+
+        # 16.5 Re-derivation proof: stamped verdict, GET /audit-trail 200, 6 checks re-derived from DB rulebook
+        active_db_book = await get_active_usd_rulebook(db)
+        evt_rules_id = "evt_rederive_integ_1"
+        evt_unk_id = "evt_rederive_unk_2"
+        await db.events.delete_many({"event_id": {"$in": [evt_rules_id, evt_unk_id]}})
+        await db.decisions.delete_many({"event_id": {"$in": [evt_rules_id, evt_unk_id]}})
+        await db.policy_verdicts.delete_many({"event_id": {"$in": [evt_rules_id, evt_unk_id]}})
+
+        evt_doc_rederive = {
+            "_id": ObjectId(),
+            "event_id": evt_rules_id,
+            "customer_ref": "cust_rules_integ_1",
+            "surface": "subscription",
+            "raw_failure_reason": "INSUFFICIENT_FUNDS",
+            "created_at": datetime.now(timezone.utc),
+            "amount": 180.0,
+            "currency": "USD",
+            "status": "at_risk",
+            "gateway": "paypal",
+            "gateway_ref": "WH-REVI-INTEG-1",
+        }
+        dec_doc_rederive = {
+            "_id": ObjectId(dec_rules.id),
+            "version": 1,
+            "event_id": evt_rules_id,
+            "diagnosis_id": ObjectId(dec_rules.diagnosis_id),
+            "diagnosis_version": 1,
+            "recommended_intervention": dec_rules.recommended_intervention,
+            "estimated_cost": dec_rules.estimated_cost,
+            "recovery_probability": dec_rules.recovery_probability,
+            "revenue_at_risk": dec_rules.revenue_at_risk,
+            "expected_recovery_value": dec_rules.expected_recovery_value,
+            "reasoning": dec_rules.reasoning,
+            "decided_at": dec_rules.decided_at,
+        }
+        v_stamped = evaluate(decision=dec_rules, context=ctx_rules, rulebook=active_db_book)
+        verdict_doc_rederive = {
+            "_id": ObjectId(),
+            "event_id": evt_rules_id,
+            "decision_id": dec_rules.id,
+            "decision_version": 1,
+            "verdict": v_stamped.verdict,
+            "reason": v_stamped.reason,
+            "checks_performed": v_stamped.checks_performed,
+            "evaluated_at": v_stamped.evaluated_at,
+            "rulebook_fingerprint": active_db_book.fingerprint,
+            "rulebook_fingerprint_source": "evaluated",
+            "version": 1,
+        }
+        await db.events.insert_one(evt_doc_rederive)
+        await db.decisions.insert_one(dec_doc_rederive)
+        await db.policy_verdicts.insert_one(verdict_doc_rederive)
+
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as test_client:
+            resp_trail = await test_client.get(f"/audit-trail/{evt_rules_id}")
+            assert resp_trail.status_code == 200, f"audit trail failed: {resp_trail.status_code} {resp_trail.text}"
+            trail_data = resp_trail.json()
+            assert len(trail_data.get("policy_verdicts", [])) == 1
+            stamped_fp = trail_data["policy_verdicts"][0]["rulebook_fingerprint"]
+            assert stamped_fp == active_db_book.fingerprint
+
+            # Re-derive from DATABASE rulebook
+            resolved_db_book = await resolve_rulebook(stamped_fp, db=db)
+            assert resolved_db_book is not None
+            rederived = evaluate(decision=dec_rules, context=ctx_rules, rulebook=resolved_db_book)
+            assert rederived.verdict == v_stamped.verdict
+            assert rederived.reason == v_stamped.reason
+            assert len(rederived.checks_performed) == 6
+
+            # Unknown fingerprint test: GET /audit-trail returns 200, shows "not available" when resolved, never 500
+            evt_unk_doc = dict(evt_doc_rederive, _id=ObjectId(), event_id=evt_unk_id)
+            verdict_unk_doc = dict(verdict_doc_rederive, _id=ObjectId(), event_id=evt_unk_id, rulebook_fingerprint="unknown")
+            await db.events.insert_one(evt_unk_doc)
+            await db.policy_verdicts.insert_one(verdict_unk_doc)
+            resp_unk = await test_client.get(f"/audit-trail/{evt_unk_id}")
+            assert resp_unk.status_code == 200, f"unknown fp returned {resp_unk.status_code}"
+            assert (await resolve_rulebook("rb1_0000000000000000", db=db)) is None
+
+            # Clean up test events
+            await db.events.delete_many({"event_id": {"$in": [evt_rules_id, evt_unk_id]}})
+            await db.decisions.delete_many({"event_id": {"$in": [evt_rules_id, evt_unk_id]}})
+            await db.policy_verdicts.delete_many({"event_id": {"$in": [evt_rules_id, evt_unk_id]}})
+        print("  [PASS] Dynamic rulebook re-derivation: verdict stamped with DB fingerprint, GET /audit-trail returns 200, 6 checks re-derive from DB rulebook, unknown fingerprint shows 'not available' and never 500")
+
+        # 16.6 Reset clears rulebook_versions, rate limits, and caches
+        res_reset_rules = await reset_demo_database(db)
+        assert res_reset_rules["status"] == "ok"
+        count_ver = await db.rulebook_versions.count_documents({})
+        assert count_ver == 0
+        active_after_reset = await get_active_usd_rulebook(db)
+        assert active_after_reset.fingerprint == "rb1_8221b1b9069ffc80"
+        print("  [PASS] Dynamic rulebook reset: demo reset clears rulebook_versions, rate limits, preview cache, and active USD cache")
+
+        # 16.7 Admin route GET /rules/whoami
+        with patch("app.routes.rules.get_settings") as mock_settings:
+            mock_settings.return_value = Settings(
+                admin_token="vasooli_test_admin_token",
+                public_demo=True,
+                paypal_env="sandbox",
+                mongodb_uri="mongodb://localhost:27017/vasooli_regress",
+            )
+            async with httpx.AsyncClient(transport=transport, base_url="http://test") as test_client:
+                r_noauth = await test_client.get("/rules/whoami")
+                assert r_noauth.status_code == 401
+                r_wrong = await test_client.get("/rules/whoami", headers={"X-Admin-Token": "bad"})
+                assert r_wrong.status_code == 401
+                r_auth = await test_client.get("/rules/whoami", headers={"X-Admin-Token": "vasooli_test_admin_token"})
+                assert r_auth.status_code == 200
+                assert r_auth.json() == {"admin": True}
+        print("  [PASS] Admin route GET /rules/whoami: returns 401 without auth and {'admin': True} with admin token")
+
         # Cleanup test documents
         await db.demo_runs.delete_many({})
         await db.demo_counters.delete_many({})
+        await db.rulebook_versions.delete_many({})
+        await db.rules_rate_limits.delete_many({})
 
         print("\n" + "=" * 78)
-        print("RESULT: ALL INTEGRATION CHECKS PASSED (20/20)")
+        print("RESULT: ALL INTEGRATION CHECKS PASSED (27/27)")
         print("=" * 78)
         return 0
 

@@ -74,8 +74,12 @@ async def authorize_event(event_id: str) -> PolicyVerdictRecord:
     context = await policy_stage.gather_context(
         decision=decision, customer_ref=event.customer_ref
     )
+    rulebook = None
+    if (event.currency or "USD").upper() == "USD":
+        from app.policy.rulebook_store import get_active_usd_rulebook
+        rulebook = await get_active_usd_rulebook()
     verdict = policy_stage.evaluate(
-        decision=decision, context=context, currency=event.currency
+        decision=decision, context=context, currency=event.currency, rulebook=rulebook
     )
 
     try:

@@ -59,8 +59,8 @@ class PublicDemoMiddleware(BaseHTTPMiddleware):
         if request.method == "POST" and path == "/webhooks/paypal":
             return await call_next(request)
 
-        # Exact-path allowlist for public demo run route (and nothing else)
-        if request.method == "POST" and path == "/demo/public/run":
+        # Exact-path allowlist for public demo run and rules preview route
+        if request.method == "POST" and path in ("/demo/public/run", "/rules/preview"):
             return await call_next(request)
 
         # Fail closed if admin_token is empty

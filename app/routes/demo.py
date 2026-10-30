@@ -207,10 +207,16 @@ async def reset_demo_database(db: Any = None) -> dict[str, Any]:
             await database[col_name].drop()
         except Exception as exc:
             logger.debug("Drop collection %s: %s", col_name, exc)
-    try:
-        await database["demo_counters"].drop()
-    except Exception as exc:
-        logger.debug("Drop demo_counters: %s", exc)
+    for extra_col in ("demo_counters", "rulebook_versions", "rules_rate_limits"):
+        try:
+            await database[extra_col].drop()
+        except Exception as exc:
+            logger.debug("Drop extra collection %s: %s", extra_col, exc)
+
+    from app.policy.rulebook_store import ensure_rulebook_indexes, invalidate_usd_cache
+    from app.policy.gemini_rules import clear_preview_cache
+    invalidate_usd_cache()
+    clear_preview_cache()
 
     # 2. Re-ensure indexes
     await ensure_event_indexes()
@@ -224,6 +230,7 @@ async def reset_demo_database(db: Any = None) -> dict[str, Any]:
     await ensure_orchestrator_indexes(database)
     await ensure_paypal_event_indexes()
     await ensure_demo_run_indexes(database)
+    await ensure_rulebook_indexes(database)
     await reset_mongo_clock(database)
 
     return {

@@ -231,26 +231,30 @@ def _check_actionable(
                 reason="retry_not_advised",
             )
         if rulebook.tier_currency == "USD":
-            if context.prior_retry_executions >= 3:
+            rcap = getattr(rulebook, "max_retries_per_event", None)
+            effective_retry_cap = rcap if rcap is not None else 3
+            if context.prior_retry_executions >= effective_retry_cap:
                 return CheckOutcome(
                     name="decision_is_actionable",
                     passed=False,
                     detail=(
                         f"retry cap reached: {context.prior_retry_executions} prior retry executions "
-                        "for event (maximum 3)"
+                        f"for event (maximum {effective_retry_cap})"
                     ),
                     reason="retry_cap_exceeded",
                 )
             if context.last_retry_execution_at is not None:
                 gap = context.now - context.last_retry_execution_at
-                if gap < timedelta(hours=24):
+                rcooldown = getattr(rulebook, "retry_cooldown_hours", None)
+                effective_cooldown_hours = rcooldown if rcooldown is not None else 24
+                if gap < timedelta(hours=effective_cooldown_hours):
                     hours_elapsed = gap.total_seconds() / 3600.0
                     return CheckOutcome(
                         name="decision_is_actionable",
                         passed=False,
                         detail=(
                             f"retry cooldown active: {hours_elapsed:.1f}h since last retry "
-                            f"execution (minimum 24h)"
+                            f"execution (minimum {effective_cooldown_hours}h)"
                         ),
                         reason="retry_cap_exceeded",
                     )
