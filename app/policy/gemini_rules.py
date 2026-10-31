@@ -7,18 +7,22 @@ Caches validated proposals for the four example chips and in-memory text hash pr
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
 from typing import Any
 
 from app.config import get_settings
+from app.policy.rules import current_usd_rulebook
 from app.policy.validator import (
     RulebookProposalValidation,
     validate_rule_proposal,
 )
 
 logger = logging.getLogger(__name__)
+
+FALLBACK_MODEL = "gemini-3.5-flash-lite"
 
 _SYSTEM_INSTRUCTION = """\
 You parse merchant collection and recovery rules written in plain English into structured parameters for the USD policy engine.
@@ -99,6 +103,31 @@ Return JSON strictly adhering to the schema.
 
 class GeminiRulesUnavailable(RuntimeError):
     """Raised when Gemini is not configured, unreachable, or returns unparseable content."""
+
+
+def _extract_error_type(exc: Exception) -> str:
+    code = getattr(exc, "code", None)
+    if code is None and hasattr(exc, "response"):
+        code = getattr(exc.response, "status_code", None)
+    if code is not None and code in (429, 500, 503):
+        return str(code)
+
+    if isinstance(exc, (TimeoutError, asyncio.TimeoutError)):
+        return "timeout"
+
+    msg = str(exc).lower()
+    for status_str in ("429", "500", "503"):
+        if status_str in msg:
+            return status_str
+    if "timeout" in msg or "timed out" in msg:
+        return "timeout"
+
+    return type(exc).__name__
+
+
+def _is_retryable_error(exc: Exception) -> tuple[bool, str]:
+    err_type = _extract_error_type(exc)
+    return err_type in ("429", "500", "503", "timeout"), err_type
 
 
 # In-memory LRU / TTL-style cache by text hash
@@ -210,11 +239,17 @@ async def parse_and_preview_rules(
     raw_text: str,
     *,
     active_rulebook: Any = None,
+    client: Any = None,
+    retry_delay: float = 2.0,
 ) -> dict[str, Any]:
     """Parse raw plain-English rules and produce a validated proposal preview.
 
     Uses cached proposals for example chips and in-memory cache for repeated text hashes.
-    Raises GeminiRulesUnavailable (HTTP 503) when live Gemini is unconfigured or fails.
+    On 429/500/503/timeout:
+      1) Retry once after 2 seconds on primary model.
+      2) Retry once with fallback model ('gemini-3.5-flash-lite').
+    Only if all attempts fail returns clean 503 ('Rule parsing is temporarily unavailable; the example rules still work').
+    Logs only model name and error type.
     """
     settings = get_settings()
     cleaned_text = raw_text.strip()
@@ -224,46 +259,133 @@ async def parse_and_preview_rules(
     if text_hash in _PREVIEW_CACHE_BY_HASH:
         return _PREVIEW_CACHE_BY_HASH[text_hash]
 
-    # 2. Check pre-cached example chips (always available even if Gemini key is missing)
+    # 2. Check pre-cached example chips (always available even if Gemini key is missing or down)
     if text_hash in EXAMPLE_CHIP_PROPOSALS:
         cached = EXAMPLE_CHIP_PROPOSALS[text_hash]
         parsed_params = cached["proposed_parameters"]
         parsed_sources = cached["parameter_sources"]
         not_applied = cached["not_applied"]
+        malformed_error = None
     else:
-        # 3. Call live Gemini API if configured
-        if not settings.gemini_api_key or not settings.gemini_api_key.strip():
-            raise GeminiRulesUnavailable("Gemini service is unconfigured (GEMINI_API_KEY is not set).")
+        # 3. Call Gemini API if configured or client passed
+        if client is None:
+            if not settings.gemini_api_key or not settings.gemini_api_key.strip():
+                raise GeminiRulesUnavailable("Rule parsing is temporarily unavailable; the example rules still work")
+
+            try:
+                from google import genai
+            except ImportError as exc:
+                raise GeminiRulesUnavailable("Rule parsing is temporarily unavailable; the example rules still work") from exc
+
+            client = genai.Client(api_key=settings.gemini_api_key)
 
         try:
-            from google import genai
             from google.genai import types
-        except ImportError as exc:
-            raise GeminiRulesUnavailable(f"google-genai client library unavailable: {exc}") from exc
+        except ImportError:
+            class _DummyConfig:
+                def __init__(self, **kwargs: Any) -> None:
+                    for k, v in kwargs.items():
+                        setattr(self, k, v)
 
-        client = genai.Client(api_key=settings.gemini_api_key)
+            class types:  # type: ignore
+                GenerateContentConfig = _DummyConfig
+                AutomaticFunctionCallingConfig = _DummyConfig
+                HttpOptions = _DummyConfig
+
         prompt = build_prompt(cleaned_text)
 
-        try:
-            response = await client.aio.models.generate_content(
-                model=settings.gemini_model,
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    system_instruction=_SYSTEM_INSTRUCTION,
-                    response_mime_type="application/json",
-                    response_schema=rules_json_schema(),
-                    temperature=0.0,
-                    automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
-                    http_options=types.HttpOptions(timeout=int(settings.gemini_timeout_seconds * 1000)),
-                ),
-            )
-            data = json.loads(response.text)
-            parsed_params = data.get("proposed_parameters") or {}
-            parsed_sources = data.get("parameter_sources") or {}
-            not_applied = data.get("not_applied") or []
-        except Exception as exc:
-            logger.error("Gemini call for rule parsing failed: %s", exc)
-            raise GeminiRulesUnavailable(f"Gemini rule parsing call failed: {exc}") from exc
+        call_attempts = [
+            (settings.gemini_model, False),  # 1. Primary model
+            (settings.gemini_model, True),   # 2. Primary model retry after delay
+            (FALLBACK_MODEL, False),         # 3. Fallback lite model
+        ]
+
+        parsed_params = None
+        parsed_sources = None
+        not_applied = None
+        malformed_error = None
+
+        for idx, (model_name, sleep_before) in enumerate(call_attempts):
+            if sleep_before and retry_delay > 0:
+                await asyncio.sleep(retry_delay)
+
+            try:
+                response = await client.aio.models.generate_content(
+                    model=model_name,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        system_instruction=_SYSTEM_INSTRUCTION,
+                        response_mime_type="application/json",
+                        response_schema=rules_json_schema(),
+                        temperature=0.0,
+                        automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
+                        http_options=types.HttpOptions(timeout=int(settings.gemini_timeout_seconds * 1000)),
+                    ),
+                )
+            except Exception as exc:
+                retryable, err_type = _is_retryable_error(exc)
+                logger.warning("model=%s error_type=%s", model_name, err_type)
+                if not retryable or idx == len(call_attempts) - 1:
+                    raise GeminiRulesUnavailable("Rule parsing is temporarily unavailable; the example rules still work") from exc
+                continue
+
+            # Transport succeeded. If response is malformed or schema-violating, it is NEVER retried into acceptance and is rejected.
+            raw_response = (getattr(response, "text", None) or "").strip()
+            if not raw_response:
+                malformed_error = "Gemini returned an empty response"
+                break
+
+            try:
+                data = json.loads(raw_response)
+            except Exception as json_err:
+                malformed_error = f"Gemini returned non-JSON output: {json_err}"
+                break
+
+            if not isinstance(data, dict):
+                malformed_error = f"Gemini returned a non-object payload: {type(data).__name__}"
+                break
+
+            raw_p = data.get("proposed_parameters")
+            raw_s = data.get("parameter_sources")
+            raw_na = data.get("not_applied")
+
+            if raw_p is not None and not isinstance(raw_p, dict):
+                malformed_error = "Field 'proposed_parameters' must be an object."
+                break
+            if raw_s is not None and not isinstance(raw_s, dict):
+                malformed_error = "Field 'parameter_sources' must be an object."
+                break
+            if raw_na is not None and not isinstance(raw_na, list):
+                malformed_error = "Field 'not_applied' must be a list."
+                break
+
+            parsed_params = raw_p or {}
+            parsed_sources = raw_s or {}
+            not_applied = raw_na or []
+            break
+
+    import uuid
+    preview_id = f"prev_{uuid.uuid4().hex[:16]}"
+    base_book = active_rulebook if active_rulebook is not None else current_usd_rulebook()
+
+    # If response was malformed/non-JSON, it is rejected immediately
+    if malformed_error is not None:
+        result = {
+            "preview_id": preview_id,
+            "valid": False,
+            "text": cleaned_text,
+            "text_hash": text_hash,
+            "proposed_parameters": {},
+            "parameter_sources": {},
+            "errors": [malformed_error],
+            "diff": {},
+            "current_fingerprint": base_book.fingerprint,
+            "prospective_fingerprint": None,
+            "not_applied": [],
+        }
+        _PREVIEW_CACHE_BY_HASH[text_hash] = result
+        _PREVIEW_BY_ID[preview_id] = result
+        return result
 
     # 4. Deterministic validation against hard caps, invariants & source quotes
     validation: RulebookProposalValidation = validate_rule_proposal(
@@ -271,11 +393,8 @@ async def parse_and_preview_rules(
         proposed_parameters=parsed_params,
         parameter_sources=parsed_sources,
         not_applied=not_applied,
-        active_rulebook=active_rulebook,
+        active_rulebook=base_book,
     )
-
-    import uuid
-    preview_id = f"prev_{uuid.uuid4().hex[:16]}"
 
     result = {
         "preview_id": preview_id,
@@ -298,6 +417,8 @@ async def parse_and_preview_rules(
 
 def get_preview(preview_id: str) -> dict[str, Any] | None:
     return _PREVIEW_BY_ID.get(preview_id)
+
+
 def clear_preview_cache() -> None:
     """Clear in-memory preview caches."""
     _PREVIEW_CACHE_BY_HASH.clear()

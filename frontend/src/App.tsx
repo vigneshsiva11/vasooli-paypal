@@ -14,6 +14,7 @@ const PtpRoute = React.lazy(() => import('./features/ptp/components/PtpRoute'));
 const AuditTrailRoute = React.lazy(() => import('./features/audit-trail/components/AuditTrailRoute'));
 const LedgerRoute = React.lazy(() => import('./features/ledger/components/LedgerRoute'));
 const LiveRoute = React.lazy(() => import('./features/live/components/LiveRoute'));
+const RulesRoute = React.lazy(() => import('./features/rules/components/RulesRoute'));
 
 // Global query client with retry backoff for transient failures
 const queryClient = new QueryClient({
@@ -47,6 +48,7 @@ function App() {
             <Route element={<AppShell />}>
               <Route path="/" element={<DashboardRoute />} />
               <Route path="/live" element={<LiveRoute />} />
+              <Route path="/rules" element={<RulesRoute />} />
               <Route path="/ledger" element={<LedgerRoute />} />
               <Route path="/root-cause" element={<RootCauseRoute />} />
               <Route path="/baseline" element={<BaselineRoute />} />

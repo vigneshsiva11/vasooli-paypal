@@ -5038,6 +5038,114 @@ def test_step13_rule_validator() -> None:
         f"cap_verdict={verdict_cap.verdict}, cooldown_verdict={verdict_cooldown.verdict}, ok_verdict={verdict_ok.verdict}",
     )
 
+    # 13.12 - 13.16 Offline Gemini retry, fallback, malformed rejection, and cached examples
+    from unittest.mock import MagicMock
+    from app.policy.gemini_rules import (
+        parse_and_preview_rules,
+        clear_preview_cache,
+        GeminiRulesUnavailable,
+        EXAMPLE_CHIPS_TEXT,
+        FALLBACK_MODEL,
+    )
+
+    async def _test_gemini_retries():
+        valid_payload = json.dumps({
+            "proposed_parameters": {"max_contacts_per_event": 2, "cooldown_hours": 48},
+            "parameter_sources": {"max_contacts_per_event": "at most twice", "cooldown_hours": "wait 48 hours"},
+            "not_applied": [],
+        })
+
+        # 13.12: 503 then success on retry
+        clear_preview_cache()
+        mock_resp_ok = MagicMock()
+        mock_resp_ok.text = valid_payload
+        mock_client1 = MagicMock()
+        calls1 = []
+        async def side_effect1(model, contents, config):
+            calls1.append(model)
+            if len(calls1) == 1:
+                raise Exception("503 Service Unavailable")
+            return mock_resp_ok
+        mock_client1.aio.models.generate_content = AsyncMock(side_effect=side_effect1)
+        res1 = await parse_and_preview_rules("merchant rule 1: at most twice, wait 48 hours", client=mock_client1, retry_delay=0.0)
+        report(
+            "13.12 Offline Gemini retry: 503 then success on retry (primary model retried once)",
+            len(calls1) == 2 and calls1[0] == "gemini-3.6-flash" and calls1[1] == "gemini-3.6-flash" and res1["valid"] is True,
+            f"calls={calls1}, valid={res1['valid']}",
+        )
+
+        # 13.13: 503 then 503 then success on fallback
+        clear_preview_cache()
+        mock_client2 = MagicMock()
+        calls2 = []
+        async def side_effect2(model, contents, config):
+            calls2.append(model)
+            if len(calls2) in (1, 2):
+                raise Exception("503 Service Unavailable")
+            return mock_resp_ok
+        mock_client2.aio.models.generate_content = AsyncMock(side_effect=side_effect2)
+        res2 = await parse_and_preview_rules("merchant rule 2: at most twice, wait 48 hours", client=mock_client2, retry_delay=0.0)
+        report(
+            "13.13 Offline Gemini fallback: 503 then 503 then success on fallback lite variant",
+            len(calls2) == 3 and calls2[0] == "gemini-3.6-flash" and calls2[1] == "gemini-3.6-flash" and calls2[2] == FALLBACK_MODEL and res2["valid"] is True,
+            f"calls={calls2}, valid={res2['valid']}",
+        )
+
+        # 13.14: all fail -> clean 503
+        clear_preview_cache()
+        mock_client3 = MagicMock()
+        calls3 = []
+        async def side_effect3(model, contents, config):
+            calls3.append(model)
+            raise Exception("503 Service Unavailable")
+        mock_client3.aio.models.generate_content = AsyncMock(side_effect=side_effect3)
+        got_503 = False
+        try:
+            await parse_and_preview_rules("merchant rule 3: at most twice, wait 48 hours", client=mock_client3, retry_delay=0.0)
+        except GeminiRulesUnavailable as exc:
+            got_503 = str(exc) == "Rule parsing is temporarily unavailable; the example rules still work"
+        report(
+            "13.14 Offline Gemini exhaustion: all attempts fail -> clean 503 message",
+            len(calls3) == 3 and got_503,
+            f"calls={len(calls3)}, got_503={got_503}",
+        )
+
+        # 13.15: malformed or schema-violating response is NEVER retried into acceptance and is rejected
+        clear_preview_cache()
+        mock_resp_bad = MagicMock()
+        mock_resp_bad.text = "NOT JSON"
+        mock_client4 = MagicMock()
+        calls4 = []
+        async def side_effect4(model, contents, config):
+            calls4.append(model)
+            if len(calls4) > 1:
+                return mock_resp_ok
+            return mock_resp_bad
+        mock_client4.aio.models.generate_content = AsyncMock(side_effect=side_effect4)
+        res4 = await parse_and_preview_rules("merchant rule 4: at most twice, wait 48 hours", client=mock_client4, retry_delay=0.0)
+        report(
+            "13.15 Malformed or schema-violating response is NEVER retried into acceptance and is rejected",
+            len(calls4) == 1 and res4["valid"] is False and len(res4["errors"]) > 0,
+            f"calls={len(calls4)}, valid={res4['valid']}, errors={res4['errors']}",
+        )
+
+        # 13.16: cached examples work with Gemini down
+        clear_preview_cache()
+        failing_client = MagicMock()
+        calls5 = []
+        async def fail_effect(model, contents, config):
+            calls5.append(model)
+            raise Exception("503 Service Unavailable")
+        failing_client.aio.models.generate_content = AsyncMock(side_effect=fail_effect)
+        res5 = await parse_and_preview_rules(EXAMPLE_CHIPS_TEXT[0], client=failing_client, retry_delay=0.0)
+        report(
+            "13.16 Cached examples work with Gemini down: zero model calls, preview valid",
+            len(calls5) == 0 and res5["valid"] is True and res5["proposed_parameters"]["max_contacts_per_event"] == 2,
+            f"calls={len(calls5)}, valid={res5['valid']}",
+        )
+
+    asyncio.run(_test_gemini_retries())
+
 
 def main() -> int:
     print("=" * 78)

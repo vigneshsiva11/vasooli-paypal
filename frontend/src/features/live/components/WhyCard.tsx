@@ -1,4 +1,5 @@
 import React from 'react';
+import { Link } from 'react-router-dom';
 import type { AuditTrail } from '@/features/audit-trail/api/getAuditTrail';
 import { formatCurrency, formatLabel } from '@/utils/formatters';
 import { HelpCircle, CheckCircle2, XCircle } from 'lucide-react';
@@ -102,7 +103,17 @@ export const WhyCard: React.FC<Props> = ({ auditTrail, isLoading }) => {
                 </strong>
               </span>
               <span className="font-mono text-[11px] text-[var(--color-text-muted)]">
-                Fingerprint: {pol?.rulebook_fingerprint || 'not available'}
+                Fingerprint:{' '}
+                {pol?.rulebook_fingerprint ? (
+                  <Link
+                    to="/rules#history"
+                    className="font-mono text-[var(--color-accent)] underline hover:opacity-80"
+                  >
+                    {pol.rulebook_fingerprint}
+                  </Link>
+                ) : (
+                  'not available'
+                )}
               </span>
             </div>
           </div>

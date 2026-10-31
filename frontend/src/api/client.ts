@@ -1,12 +1,14 @@
 export class ApiError extends Error {
   status: number;
   payload: any;
+  headers?: Headers;
 
-  constructor(message: string, status: number, payload: any = null) {
+  constructor(message: string, status: number, payload: any = null, headers?: Headers) {
     super(message);
     this.name = 'ApiError';
     this.status = status;
     this.payload = payload;
+    this.headers = headers;
   }
 }
 
@@ -98,7 +100,8 @@ export const apiClient = async <T>(endpoint: string, options: RequestInit = {}):
     throw new ApiError(
       payload?.detail || payload?.message || 'Request failed',
       res.status,
-      payload
+      payload,
+      res.headers
     );
   }
 

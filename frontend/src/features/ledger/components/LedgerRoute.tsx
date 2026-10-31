@@ -1,9 +1,9 @@
-import React, { useMemo, useRef } from 'react';
+import React, { useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { AgGridReact } from 'ag-grid-react';
 import type { ColDef } from 'ag-grid-community';
 import { ModuleRegistry, AllCommunityModule } from 'ag-grid-community';
-import { Download, ShieldCheck, AlertCircle } from 'lucide-react';
+import { Download, ShieldCheck, AlertCircle, UserCheck } from 'lucide-react';
 import { appAgGridTheme } from '@/components/AgGridTheme';
 import { useLedgerQuery, type LedgerRow } from '../api/getLedger';
 import { useCurrency } from '@/context/CurrencyContext';
@@ -15,6 +15,9 @@ export const LedgerRoute: React.FC = () => {
   const { currency } = useCurrency();
   const { data: rows = [], isLoading, error, refetch } = useLedgerQuery(currency);
   const gridRef = useRef<AgGridReact<LedgerRow>>(null);
+
+  // Filter state: 'all' vs 'needs_approval'
+  const [filterMode, setFilterMode] = useState<'all' | 'needs_approval'>('all');
 
   const onExportCsv = () => {
     if (gridRef.current?.api) {
@@ -155,9 +158,30 @@ export const LedgerRoute: React.FC = () => {
       {
         field: 'policy_verdict',
         headerName: 'Policy Verdict',
-        width: 130,
+        width: 175,
         filter: true,
         sortable: true,
+        cellRenderer: (params: any) => {
+          const val = params.value;
+          if (val === 'requires_manual_review') {
+            return (
+              <div className="flex flex-col justify-center leading-tight py-1">
+                <span className="inline-flex items-center gap-1 font-semibold text-amber-700">
+                  <span className="h-1.5 w-1.5 rounded-full bg-amber-500" />
+                  Needs approval
+                </span>
+                <span className="text-[10px] text-gray-500">Routed to a human</span>
+              </div>
+            );
+          }
+          if (val === 'authorized') {
+            return <span className="font-semibold text-[var(--color-status-recovered)]">Authorized</span>;
+          }
+          if (val === 'blocked') {
+            return <span className="font-semibold text-[var(--color-status-blocked)]">Blocked</span>;
+          }
+          return <span className="text-gray-500">{val || 'None'}</span>;
+        },
       },
       {
         field: 'gateway',
@@ -191,6 +215,22 @@ export const LedgerRoute: React.FC = () => {
     });
     return { totalAtRisk, totalVerified, totalAsserted, count: rows.length };
   }, [rows]);
+
+  // "Needs approval" filtering for manual-review verdicts
+  const needsApprovalCount = useMemo(() => {
+    return rows.filter(
+      (r) => r.policy_verdict === 'requires_manual_review' || r.verdict === 'requires_manual_review'
+    ).length;
+  }, [rows]);
+
+  const displayedRows = useMemo(() => {
+    if (filterMode === 'needs_approval') {
+      return rows.filter(
+        (r) => r.policy_verdict === 'requires_manual_review' || r.verdict === 'requires_manual_review'
+      );
+    }
+    return rows;
+  }, [rows, filterMode]);
 
   return (
     <div className="space-y-6 pb-12">
@@ -249,6 +289,42 @@ export const LedgerRoute: React.FC = () => {
         </div>
       </div>
 
+      {/* Filter Tabs & "Needs approval" note */}
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => setFilterMode('all')}
+            className={`rounded-lg px-3.5 py-1.5 text-xs font-semibold transition ${
+              filterMode === 'all'
+                ? 'bg-[var(--color-primary)] text-white shadow-xs'
+                : 'bg-white border border-gray-200 text-gray-600 hover:bg-gray-50'
+            }`}
+          >
+            All Events ({rows.length})
+          </button>
+          <button
+            type="button"
+            onClick={() => setFilterMode('needs_approval')}
+            className={`inline-flex items-center gap-1.5 rounded-lg px-3.5 py-1.5 text-xs font-semibold transition ${
+              filterMode === 'needs_approval'
+                ? 'bg-amber-600 text-white shadow-xs'
+                : 'bg-white border border-amber-200 text-amber-800 hover:bg-amber-50/50'
+            }`}
+          >
+            <UserCheck className="h-3.5 w-3.5" />
+            Needs approval ({needsApprovalCount})
+          </button>
+        </div>
+
+        {filterMode === 'needs_approval' && (
+          <div className="flex items-center gap-2 rounded-lg bg-amber-50 px-3 py-1.5 text-xs text-amber-900 border border-amber-200">
+            <span className="font-semibold">Note:</span>
+            <span>Routed to a human</span>
+          </div>
+        )}
+      </div>
+
       {error ? (
         <div className="rounded-xl border border-[var(--color-status-blocked)]/20 bg-[var(--color-status-blocked)]/5 p-8 text-center">
           <div className="mx-auto flex h-10 w-10 items-center justify-center rounded-full bg-[var(--color-status-blocked)]/10 text-[var(--color-status-blocked)]">
@@ -270,7 +346,7 @@ export const LedgerRoute: React.FC = () => {
           <AgGridReact<LedgerRow>
             ref={gridRef}
             theme={appAgGridTheme}
-            rowData={rows}
+            rowData={displayedRows}
             columnDefs={columnDefs}
             loading={isLoading}
             defaultColDef={{
