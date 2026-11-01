@@ -149,6 +149,37 @@ export function evaluateHardCaps(
   };
 }
 
+export function getHistoryRowLabel(provenance?: string | null): 'Applied rule' | 'Previous baseline' {
+  return provenance === 'database' ? 'Applied rule' : 'Previous baseline';
+}
+
+export interface ParamTileResult {
+  displayValue: string;
+  isDefault: boolean;
+}
+
+export function resolveActiveParamTile(
+  key: string,
+  val: number | null | undefined
+): ParamTileResult {
+  if (val != null) {
+    const cap = HARD_CAPS[key];
+    const unit = cap?.unit || '';
+    const formatted = unit === 'USD' ? `$${val}` : unit ? `${val} ${unit}` : `${val}`;
+    return { displayValue: formatted, isDefault: false };
+  }
+
+  if (key === 'max_retries_per_event') {
+    return { displayValue: '3', isDefault: true };
+  }
+
+  if (key === 'retry_cooldown_hours') {
+    return { displayValue: '24 hours', isDefault: true };
+  }
+
+  return { displayValue: '—', isDefault: false };
+}
+
 export interface RulesErrorState {
   type: '429' | '503' | 'network' | 'generic';
   message: string;
@@ -214,4 +245,3 @@ export function parseRulesError(error: any): RulesErrorState {
     retryAfterSeconds: null,
   };
 }
-

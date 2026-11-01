@@ -3,6 +3,8 @@ import {
   evaluateHardCaps,
   parseRulesError,
   EXAMPLE_CHIPS,
+  resolveActiveParamTile,
+  getHistoryRowLabel,
 } from '../features/rules/utils/rulesUtils';
 import * as adminClient from '../features/rules/adminClient';
 import * as apiClientModule from '../api/client';
@@ -130,6 +132,62 @@ describe('Rules feature: Hard-cap rendering and safety checks', () => {
 
     const cooldownCheck = evaluation.results.find((r) => r.param === 'cooldown_hours');
     expect(cooldownCheck?.passed).toBe(false);
+  });
+});
+
+describe('Rules feature: Active rulebook tiles and engine defaults (Item 3)', () => {
+  it('shows engine default (3) with default tag for max_retries_per_event when unset', () => {
+    const unsetNull = resolveActiveParamTile('max_retries_per_event', null);
+    expect(unsetNull.displayValue).toBe('3');
+    expect(unsetNull.isDefault).toBe(true);
+
+    const unsetUndefined = resolveActiveParamTile('max_retries_per_event', undefined);
+    expect(unsetUndefined.displayValue).toBe('3');
+    expect(unsetUndefined.isDefault).toBe(true);
+  });
+
+  it('shows explicit value without default tag for max_retries_per_event when set', () => {
+    const setVal = resolveActiveParamTile('max_retries_per_event', 4);
+    expect(setVal.displayValue).toBe('4 retries');
+    expect(setVal.isDefault).toBe(false);
+  });
+
+  it('shows engine default (24 hours) with default tag for retry_cooldown_hours when unset', () => {
+    const unsetNull = resolveActiveParamTile('retry_cooldown_hours', null);
+    expect(unsetNull.displayValue).toBe('24 hours');
+    expect(unsetNull.isDefault).toBe(true);
+
+    const unsetUndefined = resolveActiveParamTile('retry_cooldown_hours', undefined);
+    expect(unsetUndefined.displayValue).toBe('24 hours');
+    expect(unsetUndefined.isDefault).toBe(true);
+  });
+
+  it('shows explicit value without default tag for retry_cooldown_hours when set', () => {
+    const setVal = resolveActiveParamTile('retry_cooldown_hours', 12);
+    expect(setVal.displayValue).toBe('12 hours');
+    expect(setVal.isDefault).toBe(false);
+  });
+
+  it('handles standard params formatting when set or unset', () => {
+    const autoAuth = resolveActiveParamTile('auto_authorize_below', 50);
+    expect(autoAuth.displayValue).toBe('$50');
+    expect(autoAuth.isDefault).toBe(false);
+
+    const unsetOther = resolveActiveParamTile('minimum_erv', null);
+    expect(unsetOther.displayValue).toBe('—');
+    expect(unsetOther.isDefault).toBe(false);
+  });
+});
+
+describe('Rules feature: History row labelling (Item 2)', () => {
+  it('labels rows that come from code as "Previous baseline"', () => {
+    expect(getHistoryRowLabel('code_baseline')).toBe('Previous baseline');
+    expect(getHistoryRowLabel(undefined)).toBe('Previous baseline');
+    expect(getHistoryRowLabel(null)).toBe('Previous baseline');
+  });
+
+  it('labels real database rows as "Applied rule"', () => {
+    expect(getHistoryRowLabel('database')).toBe('Applied rule');
   });
 });
 

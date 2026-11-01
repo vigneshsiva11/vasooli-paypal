@@ -1,7 +1,7 @@
 import React from 'react';
 import { ShieldCheck, RotateCcw, Database, Code2 } from 'lucide-react';
 import type { ActiveRulebook } from '../api/rulesApi';
-import { HARD_CAPS } from '../utils/rulesUtils';
+import { HARD_CAPS, resolveActiveParamTile } from '../utils/rulesUtils';
 
 interface Props {
   activeRulebook: ActiveRulebook | null;
@@ -98,14 +98,20 @@ export const ActiveRulebookBanner: React.FC<Props> = ({
       <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-3 text-xs">
         {Object.entries(HARD_CAPS).map(([key, cap]) => {
           const val = params[key as keyof typeof params];
+          const tile = resolveActiveParamTile(key, val);
           return (
             <div key={key} className="rounded-lg border border-gray-100 bg-gray-50/60 p-2.5">
               <span className="block text-[11px] text-[var(--color-text-muted)] leading-tight truncate" title={cap.label}>
                 {cap.label}
               </span>
-              <span className="mt-1 block font-mono font-semibold text-[var(--color-primary)] text-sm">
-                {val != null ? (cap.unit === 'USD' ? `$${val}` : `${val} ${cap.unit}`) : '—'}
-              </span>
+              <div className="mt-1 flex items-baseline gap-1.5 font-mono font-semibold text-[var(--color-primary)] text-sm">
+                <span>{tile.displayValue}</span>
+                {tile.isDefault && (
+                  <span className="rounded bg-gray-200/80 px-1 py-0.5 text-[9px] font-sans font-medium uppercase tracking-wider text-gray-600">
+                    default
+                  </span>
+                )}
+              </div>
             </div>
           );
         })}
@@ -120,4 +126,3 @@ export const ActiveRulebookBanner: React.FC<Props> = ({
     </div>
   );
 };
-

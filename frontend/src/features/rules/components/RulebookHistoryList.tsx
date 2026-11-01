@@ -1,7 +1,7 @@
 import React from 'react';
 import { History, CheckCircle2, Clock, UserCheck, Code2, Database } from 'lucide-react';
 import type { RulebookHistoryItem } from '../api/rulesApi';
-import { HARD_CAPS } from '../utils/rulesUtils';
+import { HARD_CAPS, getHistoryRowLabel } from '../utils/rulesUtils';
 
 interface Props {
   history: RulebookHistoryItem[];
@@ -39,7 +39,8 @@ export const RulebookHistoryList: React.FC<Props> = ({
         <div className="space-y-3">
           {history.map((item, idx) => {
             const isActive = item.is_active || item.fingerprint === activeFingerprint;
-            const isBaseline = item.provenance === 'code_baseline' || !item.provenance;
+            const isDbRow = item.provenance === 'database';
+            const provenanceLabel = getHistoryRowLabel(item.provenance);
             const params = item.parameters || {};
 
             return (
@@ -73,11 +74,13 @@ export const RulebookHistoryList: React.FC<Props> = ({
                     </span>
                     <span
                       className={`inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium ${
-                        isBaseline ? 'bg-blue-50 text-blue-700' : 'bg-purple-50 text-purple-700'
+                        isDbRow
+                          ? 'bg-purple-50 text-purple-700 border border-purple-200'
+                          : 'bg-blue-50 text-blue-700 border border-blue-200'
                       }`}
                     >
-                      {isBaseline ? <Code2 className="h-2.5 w-2.5" /> : <Database className="h-2.5 w-2.5" />}
-                      {isBaseline ? 'Baseline' : 'DB Override'}
+                      {isDbRow ? <Database className="h-2.5 w-2.5" /> : <Code2 className="h-2.5 w-2.5" />}
+                      {provenanceLabel}
                     </span>
                   </div>
 
@@ -126,4 +129,3 @@ export const RulebookHistoryList: React.FC<Props> = ({
     </section>
   );
 };
-

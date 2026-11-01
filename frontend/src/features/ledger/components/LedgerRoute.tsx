@@ -7,7 +7,7 @@ import { Download, ShieldCheck, AlertCircle, UserCheck } from 'lucide-react';
 import { appAgGridTheme } from '@/components/AgGridTheme';
 import { useLedgerQuery, type LedgerRow } from '../api/getLedger';
 import { useCurrency } from '@/context/CurrencyContext';
-import { formatCurrency, formatLabel } from '@/utils/formatters';
+import { formatCurrency, formatLabel, formatGateway } from '@/utils/formatters';
 
 ModuleRegistry.registerModules([AllCommunityModule]);
 
@@ -158,37 +158,78 @@ export const LedgerRoute: React.FC = () => {
       {
         field: 'policy_verdict',
         headerName: 'Policy Verdict',
-        width: 175,
+        width: 185,
         filter: true,
         sortable: true,
         cellRenderer: (params: any) => {
           const val = params.value;
+          const gatewayLabel = formatGateway(params.data?.gateway);
           if (val === 'requires_manual_review') {
             return (
               <div className="flex flex-col justify-center leading-tight py-1">
                 <span className="inline-flex items-center gap-1 font-semibold text-amber-700">
                   <span className="h-1.5 w-1.5 rounded-full bg-amber-500" />
                   Needs approval
+                  {gatewayLabel && (
+                    <span className="ml-1 text-[11px] font-medium text-amber-800">
+                      ({gatewayLabel})
+                    </span>
+                  )}
                 </span>
-                <span className="text-[10px] text-gray-500">Routed to a human</span>
+                <span className="text-[10px] text-gray-500">
+                  Routed to a human{gatewayLabel ? ` · ${gatewayLabel}` : ''}
+                </span>
               </div>
             );
           }
           if (val === 'authorized') {
-            return <span className="font-semibold text-[var(--color-status-recovered)]">Authorized</span>;
+            return (
+              <div className="flex flex-col justify-center leading-tight py-1">
+                <span className="font-semibold text-[var(--color-status-recovered)]">Authorized</span>
+                {gatewayLabel && <span className="text-[10px] text-gray-500">{gatewayLabel}</span>}
+              </div>
+            );
           }
           if (val === 'blocked') {
-            return <span className="font-semibold text-[var(--color-status-blocked)]">Blocked</span>;
+            return (
+              <div className="flex flex-col justify-center leading-tight py-1">
+                <span className="font-semibold text-[var(--color-status-blocked)]">Blocked</span>
+                {gatewayLabel && <span className="text-[10px] text-gray-500">{gatewayLabel}</span>}
+              </div>
+            );
           }
-          return <span className="text-gray-500">{val || 'None'}</span>;
+          return (
+            <div className="flex flex-col justify-center leading-tight py-1">
+              <span className="text-gray-500">{val || 'None'}</span>
+              {gatewayLabel && <span className="text-[10px] text-gray-400">{gatewayLabel}</span>}
+            </div>
+          );
         },
       },
       {
         field: 'gateway',
         headerName: 'Gateway',
-        width: 110,
+        width: 120,
         filter: true,
         sortable: true,
+        valueFormatter: (params) => formatGateway(params.value),
+        cellRenderer: (params: any) => {
+          const formatted = formatGateway(params.value);
+          if (!formatted) return <span className="text-gray-400">—</span>;
+          return (
+            <span
+              className={`inline-block rounded px-2 py-0.5 text-xs font-semibold ${
+                formatted === 'PayPal'
+                  ? 'bg-blue-50 text-blue-700 border border-blue-200'
+                  : formatted === 'Razorpay'
+                  ? 'bg-indigo-50 text-indigo-700 border border-indigo-200'
+                  : 'bg-gray-100 text-gray-700'
+              }`}
+            >
+              {formatted}
+            </span>
+          );
+        },
       },
       {
         field: 'execution_ref',

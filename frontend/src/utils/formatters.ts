@@ -31,6 +31,16 @@ export const formatLabel = (key: string): string => {
     .join(' ');
 };
 
+export const formatGateway = (gateway?: string | null): string => {
+  if (!gateway) return '';
+  const trimmed = gateway.trim();
+  if (!trimmed) return '';
+  const normalized = trimmed.toLowerCase();
+  if (normalized === 'paypal') return 'PayPal';
+  if (normalized === 'razorpay') return 'Razorpay';
+  return formatLabel(trimmed);
+};
+
 export const deriveGatewayConfirmedText = (gateway?: string | null): string => {
   if (!gateway) return 'Gateway webhook confirmed';
   const normalized = gateway.toLowerCase();

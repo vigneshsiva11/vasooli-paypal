@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { formatCurrency, deriveGatewayConfirmedText } from '../utils/formatters';
+import { formatCurrency, deriveGatewayConfirmedText, formatGateway } from '../utils/formatters';
 
 describe('formatCurrency', () => {
   it('formats USD with en-US locale by default or explicit', () => {
@@ -42,3 +42,34 @@ describe('deriveGatewayConfirmedText', () => {
   });
 });
 
+describe('formatGateway (Ledger row gateway field and verdict formatting)', () => {
+  it('maps paypal to "PayPal"', () => {
+    expect(formatGateway('paypal')).toBe('PayPal');
+    expect(formatGateway('PayPal')).toBe('PayPal');
+    expect(formatGateway(' PAYPAL ')).toBe('PayPal');
+  });
+
+  it('maps razorpay to "Razorpay"', () => {
+    expect(formatGateway('razorpay')).toBe('Razorpay');
+    expect(formatGateway('Razorpay')).toBe('Razorpay');
+    expect(formatGateway(' RAZORPAY ')).toBe('Razorpay');
+  });
+
+  it('removes any Razorpay default when gateway is missing or null', () => {
+    expect(formatGateway(null)).toBe('');
+    expect(formatGateway(undefined)).toBe('');
+    expect(formatGateway('')).toBe('');
+    expect(formatGateway('   ')).toBe('');
+  });
+
+  it('derives label dynamically from row gateway without hard-coding', () => {
+    const rowPayPal = { gateway: 'paypal' };
+    const rowRazorpay = { gateway: 'razorpay' };
+    const rowUnknown = { gateway: null };
+
+    expect(formatGateway(rowPayPal.gateway)).toBe('PayPal');
+    expect(formatGateway(rowRazorpay.gateway)).toBe('Razorpay');
+    expect(formatGateway(rowUnknown.gateway)).not.toBe('Razorpay');
+    expect(formatGateway(rowUnknown.gateway)).toBe('');
+  });
+});
