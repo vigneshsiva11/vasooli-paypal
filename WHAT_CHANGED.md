@@ -62,3 +62,5 @@ Baseline: the original Vasooli repository at tag `razorpay-buildathon-submission
 ## 2026-11-02: Agent gateway
 - Shared gateway tool core with seven in-memory attack scenarios that write nothing, an audit collection, and a rate-limited public REST adapter.
 - MCP server at /mcp with a bearer agent token and an allowlisted tool list; every call audited.
+
+- Added the /agent page: seven attack scenarios evaluated by the real policy layer in dry-run, with a live audit feed.

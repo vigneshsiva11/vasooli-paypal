@@ -11,6 +11,7 @@ import {
   SlidersHorizontal,
   Menu,
   X,
+  Bot,
 } from 'lucide-react';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
@@ -25,6 +26,7 @@ const NAV_ITEMS = [
   { path: '/', label: 'Overview', icon: LayoutDashboard },
   { path: '/live', label: 'Mission Control', icon: Radio },
   { path: '/rules', label: 'Rules', icon: SlidersHorizontal },
+  { path: '/agent', label: 'Try to break it', icon: Bot },
   { path: '/ledger', label: 'Ledger', icon: BookOpen },
   { path: '/root-cause', label: 'Root Cause', icon: TrendingDown },
   { path: '/baseline', label: 'Baseline', icon: Target },

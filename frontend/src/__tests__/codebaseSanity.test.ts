@@ -28,6 +28,7 @@ describe('Frontend codebase sanity checks', () => {
     const tokenHeaderPattern = 'X-Admin-' + 'Token';
     const forbiddenPatterns = [
       'ADMIN_' + 'TOKEN',
+      'AGENT_' + 'TOKEN',
       'v' + 'ault',
       'p' + 'ayer',
     ];
