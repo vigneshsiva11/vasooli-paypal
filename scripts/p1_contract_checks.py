@@ -5147,6 +5147,309 @@ def test_step13_rule_validator() -> None:
     asyncio.run(_test_gemini_retries())
 
 
+
+
+def test_step14_agent_gateway() -> None:
+    print("\n--- SECTION 14: AGENT GATEWAY, AUDIT, LIMITS & ATTACK SCENARIOS (OFFLINE) ---")
+    import asyncio
+    from unittest.mock import patch
+    from fastapi.testclient import TestClient
+    from fastapi.middleware.cors import CORSMiddleware
+    from fastapi import FastAPI
+    from app.main import app
+    from app.config import Settings
+    from app.gateway import audit, catalogue, limits, tools
+    from app.gateway.tools import (
+        ALLOWED_TOOLS,
+        dispatch_tool,
+        execute_recovery,
+        get_active_rules,
+        get_event_audit,
+        list_at_risk_events,
+        propose_contact,
+        propose_recovery,
+        sanitize_agent_output,
+        validate_safe_string,
+    )
+    from app.gateway.audit import (
+        clear_offline_audit_log,
+        get_recent_audit_records,
+        hash_args,
+        record_audit,
+    )
+    from app.gateway.limits import (
+        CLIENT_LIMIT_PER_MINUTE,
+        check_and_record_attempt,
+        clear_limits,
+    )
+    from app.sanitizer import assert_no_forbidden_keys
+
+    async def _run_offline_step14():
+        clear_offline_audit_log()
+        clear_limits()
+        tools.clear_execution_cooldowns()
+
+        # 14.1 Scenario 1: retry on 9500
+        res_9500 = await catalogue.run_scenario("retry_on_9500", client_key_hash="test_c1")
+        report(
+            "14.1 Scenario 1 (retry on 9500): verdict=blocked, reason=retry_not_advised",
+            res_9500["verdict"] == "blocked" and res_9500["reason"] == "retry_not_advised" and res_9500["outcome"] == "blocked",
+            f"verdict={res_9500['verdict']}, reason={res_9500['reason']}",
+        )
+
+        # 14.2 Scenario 2: opted-out contact
+        res_opt = await catalogue.run_scenario("opted_out_contact", client_key_hash="test_c1")
+        report(
+            "14.2 Scenario 2 (opted-out contact): verdict=blocked, reason=customer_opted_out",
+            res_opt["verdict"] == "blocked" and res_opt["reason"] == "customer_opted_out" and res_opt["outcome"] == "blocked",
+            f"verdict={res_opt['verdict']}, reason={res_opt['reason']}",
+        )
+
+        # 14.3 Scenario 3: fourth contact
+        res_4th = await catalogue.run_scenario("fourth_contact", client_key_hash="test_c1")
+        report(
+            "14.3 Scenario 3 (fourth contact): verdict=blocked, reason=contact_cap_exceeded",
+            res_4th["verdict"] == "blocked" and res_4th["reason"] == "contact_cap_exceeded" and res_4th["outcome"] == "blocked",
+            f"verdict={res_4th['verdict']}, reason={res_4th['reason']}",
+        )
+
+        # 14.4 Scenario 4: $1,500 without approval
+        res_1500 = await catalogue.run_scenario("1500_without_approval", client_key_hash="test_c1")
+        report(
+            "14.4 Scenario 4 ($1,500 without approval): verdict=requires_manual_review, reason=amount_never_auto",
+            res_1500["verdict"] == "requires_manual_review" and res_1500["reason"] == "amount_never_auto" and res_1500["outcome"] == "manual_review",
+            f"verdict={res_1500['verdict']}, reason={res_1500['reason']}",
+        )
+
+        # 14.5 Scenario 5: execute on an attack-range event
+        res_exec_atk = await catalogue.run_scenario("execute_on_attack_range_event", client_key_hash="test_c1")
+        report(
+            "14.5 Scenario 5 (execute on attack-range event): outcome=refused, reason=attack_range_scenario_refused",
+            res_exec_atk["outcome"] == "refused" and res_exec_atk["reason"] == "attack_range_scenario_refused" and res_exec_atk["verdict"] == "refused",
+            f"outcome={res_exec_atk['outcome']}, reason={res_exec_atk['reason']}",
+        )
+
+        # 14.6 Scenario 6: call apply_rules
+        res_rules = await catalogue.run_scenario("call_apply_rules", client_key_hash="test_c1")
+        report(
+            "14.6 Scenario 6 (call apply_rules): outcome=refused, reason=not offered",
+            res_rules["outcome"] == "refused" and res_rules["reason"] == "not offered" and res_rules["verdict"] == "refused",
+            f"outcome={res_rules['outcome']}, reason={res_rules['reason']}",
+        )
+
+        # 14.7 Scenario 7: normal $49 authorized
+        res_norm = await catalogue.run_scenario("normal_49_authorized", client_key_hash="test_c1")
+        report(
+            "14.7 Scenario 7 (normal $49 authorized): verdict=authorized, reason=ok",
+            res_norm["verdict"] == "authorized" and res_norm["reason"] == "ok" and res_norm["outcome"] == "allowed",
+            f"verdict={res_norm['verdict']}, reason={res_norm['reason']}",
+        )
+
+        # 14.8 Unknown tool refused and audited
+        clear_offline_audit_log()
+        refusal = await dispatch_tool("unregistered_malicious_tool", {"param": 1}, client_key_hash="probe_ip")
+        audit_records = await get_recent_audit_records(limit=10)
+        tool_refused_ok = (
+            refusal["outcome"] == "refused"
+            and refusal["reason"] == "not offered"
+            and len(audit_records) == 1
+            and audit_records[0]["tool"] == "unregistered_malicious_tool"
+            and audit_records[0]["outcome"] == "refused"
+            and audit_records[0]["reason"] == "not offered"
+        )
+        report(
+            "14.8 Unknown tool refused with 'not offered' and correctly audited",
+            tool_refused_ok,
+            f"outcome={refusal['outcome']}, audited={len(audit_records)}",
+        )
+
+        # 14.9 Argument validation: safe strings pass, oversized and injected fail
+        val_ok = validate_safe_string("valid_event_id_01", field_name="event_id", max_len=128) == "valid_event_id_01"
+        oversized_caught = False
+        try:
+            validate_safe_string("a" * 150, field_name="event_id", max_len=128)
+        except ValueError:
+            oversized_caught = True
+
+        injection_caught = 0
+        injections = [
+            "evt_1; DROP TABLE events; --",
+            "<script>alert(1)</script>",
+            "evt_{$gt: ''}",
+            "evt\x00_null",
+            "evt' OR 1=1 --",
+            '{"$ne": null}',
+        ]
+        for inj in injections:
+            try:
+                validate_safe_string(inj, field_name="event_id", max_len=128)
+            except ValueError:
+                injection_caught += 1
+
+        report(
+            "14.9 Argument validation: safe string passes, oversized and all 6 injections rejected",
+            val_ok and oversized_caught and injection_caught == len(injections),
+            f"val_ok={val_ok}, oversized={oversized_caught}, injections_caught={injection_caught}/{len(injections)}",
+        )
+
+        # 14.10 Limits: 10/min per client, 11th rejected with retry_after
+        clear_limits()
+        c_hash = "client_quota_test"
+        all_10_passed = True
+        for i in range(CLIENT_LIMIT_PER_MINUTE):
+            allowed, _, _ = await check_and_record_attempt(c_hash)
+            if not allowed:
+                all_10_passed = False
+                break
+        eleventh_allowed, eleventh_msg, retry_after = await check_and_record_attempt(c_hash)
+        other_client_allowed, _, _ = await check_and_record_attempt("client_other")
+        limits_ok = (
+            all_10_passed
+            and not eleventh_allowed
+            and (retry_after is not None and retry_after > 0)
+            and other_client_allowed
+        )
+        report(
+            "14.10 Limits: 10/min per client accepted, 11th rejected with 429 Retry-After, different client accepted",
+            limits_ok,
+            f"all_10={all_10_passed}, 11th={eleventh_allowed}, retry_after={retry_after}, other={other_client_allowed}",
+        )
+
+        # 14.11 Audit row schema & fields verification
+        clear_offline_audit_log()
+        await record_audit(
+            tool="propose_recovery",
+            event_or_scenario="retry_on_9500",
+            args={"amount": 49.0},
+            outcome="blocked",
+            reason="retry_not_advised",
+            check="decision_is_actionable",
+            verdict="blocked",
+            rulebook_fingerprint="rb1_8221b1b9069ffc80",
+            client_key_hash="c_hash_audit",
+        )
+        recent = await get_recent_audit_records(limit=10)
+        row = recent[0] if recent else {}
+        expected_keys = {
+            "agent_id",
+            "tool",
+            "event_or_scenario",
+            "args_hash",
+            "outcome",
+            "reason",
+            "check",
+            "verdict",
+            "rulebook_fingerprint",
+            "at",
+            "client_key_hash",
+        }
+        row_fields_ok = expected_keys.issubset(set(row.keys())) and row.get("outcome") == "blocked"
+        report(
+            "14.11 Audit row structure: all 11 required fields present with typed values",
+            row_fields_ok,
+            f"fields={sorted(row.keys())}",
+        )
+
+        # 14.12 Sanitization key scan: recursive scanner passes on all outputs
+        all_scenarios = catalogue.list_scenarios()
+        assert_no_forbidden_keys(all_scenarios, path="scenarios")
+        assert_no_forbidden_keys(recent, path="audit_records")
+        # Check that raw customer text is absent from sanitized agent output
+        raw_test_doc = {
+            "event_id": "evt_safe_1",
+            "amount": 49.0,
+            "raw_failure_reason": "do not leak raw customer text",
+            "raw_text": "customer said I will pay Monday",
+            "customer_notes": "sensitive notes",
+            "contact_message_summary": "reminder sent",
+        }
+        sanitized_agent_doc = sanitize_agent_output(raw_test_doc)
+        no_customer_text = (
+            "raw_failure_reason" not in sanitized_agent_doc
+            and "raw_text" not in sanitized_agent_doc
+            and "customer_notes" not in sanitized_agent_doc
+            and "contact_message_summary" not in sanitized_agent_doc
+            and "event_id" in sanitized_agent_doc
+        )
+        assert_no_forbidden_keys(sanitized_agent_doc, path="agent_doc")
+        report(
+            "14.12 Sanitization key scan: zero forbidden keys in agent outputs and zero raw customer text",
+            no_customer_text,
+            f"keys_remaining={sorted(sanitized_agent_doc.keys())}",
+        )
+
+        # 14.13 REST endpoints & PublicDemoMiddleware allowlist
+        with patch("app.middleware.get_settings") as mock_settings:
+            mock_settings.return_value = Settings(
+                public_demo=True,
+                admin_token="vasooli_test_secret",
+                paypal_env="sandbox",
+            )
+            client = TestClient(app)
+            # GET /agent/scenarios (public)
+            r_scenarios = client.get("/agent/scenarios")
+            # GET /agent/audit (public)
+            r_audit = client.get("/agent/audit?limit=10")
+            # POST /agent/attempt (public allowlist)
+            r_attempt = client.post("/agent/attempt", json={"scenario_id": "normal_49_authorized"})
+            # Invalid scenario returns 400
+            r_unknown = client.post("/agent/attempt", json={"scenario_id": "unknown_scenario_xyz"})
+            # Sibling POST without admin token rejected by PublicDemoMiddleware
+            r_sibling_post = client.post("/agent/other", json={})
+
+            rest_ok = (
+                r_scenarios.status_code == 200
+                and len(r_scenarios.json()) == 7
+                and r_audit.status_code == 200
+                and r_attempt.status_code == 200
+                and r_attempt.json().get("verdict") == "authorized"
+                and r_unknown.status_code == 400
+                and r_sibling_post.status_code in (401, 404, 405)
+            )
+            report(
+                "14.13 REST /agent endpoints: public attempt allowed, scenarios/audit 200, unknown scenario 400, sibling blocked",
+                rest_ok,
+                f"attempt={r_attempt.status_code}, unknown={r_unknown.status_code}, sibling={r_sibling_post.status_code}",
+            )
+
+        # 14.14 CORS preflight for POST /agent/attempt
+        cors_app = FastAPI()
+        cors_app.add_middleware(
+            CORSMiddleware,
+            allow_origins=["https://allowed.vasooli.example"],
+            allow_credentials=True,
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
+        c_client = TestClient(cors_app)
+        r_cors_ok = c_client.options(
+            "/agent/attempt",
+            headers={
+                "Origin": "https://allowed.vasooli.example",
+                "Access-Control-Request-Method": "POST",
+            },
+        )
+        r_cors_bad = c_client.options(
+            "/agent/attempt",
+            headers={
+                "Origin": "https://unauthorized.evil.example",
+                "Access-Control-Request-Method": "POST",
+            },
+        )
+        cors_ok = (
+            r_cors_ok.status_code == 200
+            and r_cors_ok.headers.get("access-control-allow-origin") == "https://allowed.vasooli.example"
+            and r_cors_bad.status_code == 400
+        )
+        report(
+            "14.14 CORS preflight on /agent/attempt: allowed for configured origins, refused for unconfigured",
+            cors_ok,
+            f"allowed_status={r_cors_ok.status_code}, bad_status={r_cors_bad.status_code}",
+        )
+
+    asyncio.run(_run_offline_step14())
+
+
 def main() -> int:
     print("=" * 78)
     print("PHASE 1 CONTRACT CHECKS (OFFLINE — NO NETWORK, NO DB, NO SERVER)")
@@ -5165,6 +5468,7 @@ def main() -> int:
     test_step11_scenario_runner_and_reset()
     test_step12_public_runs_and_sanitization()
     test_step13_rule_validator()
+    test_step14_agent_gateway()
 
     print("\n" + "=" * 78)
     print(f"SUMMARY: {PASS_COUNT} PASSED, {FAIL_COUNT} FAILED")

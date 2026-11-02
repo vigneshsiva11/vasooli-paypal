@@ -27,6 +27,7 @@ from app.policy import ensure_indexes as ensure_policy_indexes
 from app.ptp import ensure_extraction_indexes
 from app.ptp import ensure_indexes as ensure_promise_indexes
 from app.routes import (
+    agent,
     decisions,
     demo,
     diagnoses,
@@ -89,8 +90,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             await ensure_extraction_indexes()
             await demo.ensure_demo_run_indexes()
             from app.policy.rulebook_store import ensure_rulebook_indexes, get_active_usd_rulebook, RULEBOOK_VERSIONS_COLLECTION
+            from app.gateway.audit import ensure_indexes as ensure_agent_audit_indexes
+            from app.gateway.limits import ensure_indexes as ensure_agent_limits_indexes
             from app.db import get_database
             await ensure_rulebook_indexes()
+            await ensure_agent_audit_indexes()
+            await ensure_agent_limits_indexes()
             active_book = await get_active_usd_rulebook()
             db = get_database()
             active_doc = None
@@ -156,6 +161,8 @@ app.include_router(orchestrator.router)
 app.include_router(sim.router)
 # Demo reset & scenarios
 app.include_router(demo.router)
+# Agent Gateway router
+app.include_router(agent.router)
 
 
 @app.get("/", tags=["health"])

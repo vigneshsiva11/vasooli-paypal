@@ -1337,14 +1337,180 @@ async def run_integration_check() -> int:
                 assert r_auth.json() == {"admin": True}
         print("  [PASS] Admin route GET /rules/whoami: returns 401 without auth and {'admin': True} with admin token")
 
+        # -------------------------------------------------------------------
+        # 17. AGENT GATEWAY & ATTACK SCENARIOS INTEGRATION CHECKS (REAL MONGODB)
+        # -------------------------------------------------------------------
+        from app.gateway import (
+            ALLOWED_TOOLS,
+            ATTACK_SCENARIOS,
+            CLIENT_LIMIT_PER_MINUTE,
+            ensure_audit_indexes,
+            ensure_limits_indexes,
+            clear_execution_cooldowns,
+            dispatch_tool,
+            get_recent_audit_records,
+            record_audit,
+            run_scenario,
+            validate_safe_string,
+        )
+
+        await ensure_audit_indexes(db)
+        await ensure_limits_indexes(db)
+        await db.agent_counters.delete_many({})
+        clear_execution_cooldowns()
+
+        # 17.1 Zero business collection writes & valid scenario outcomes
+        colls = ["events", "executions", "policy_verdicts", "ledger", "diagnoses", "decisions", "metrics"]
+        counts_before = {c: await db[c].count_documents({}) for c in colls}
+
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as agent_client:
+            expected_scenario_results = {
+                "retry_on_9500": {"verdict": "blocked", "reason": "retry_not_advised", "outcome": "blocked"},
+                "opted_out_contact": {"verdict": "blocked", "reason": "customer_opted_out", "outcome": "blocked"},
+                "fourth_contact": {"verdict": "blocked", "reason": "contact_cap_exceeded", "outcome": "blocked"},
+                "1500_without_approval": {"verdict": "requires_manual_review", "reason": "amount_never_auto", "outcome": "manual_review"},
+                "high_value_without_approval": {"verdict": "requires_manual_review", "reason": "amount_never_auto", "outcome": "manual_review"},
+                "execute_on_attack_range_event": {"verdict": "refused", "reason": "attack_range_scenario_refused", "outcome": "refused"},
+                "call_apply_rules": {"verdict": "refused", "reason": "not offered", "outcome": "refused"},
+                "normal_49_authorized": {"verdict": "authorized", "reason": "ok", "outcome": "allowed"},
+            }
+
+            for s_id, exp in expected_scenario_results.items():
+                if s_id not in ATTACK_SCENARIOS:
+                    continue
+                resp = await agent_client.post(
+                    "/agent/attempt",
+                    json={"scenario_id": s_id},
+                    headers={"X-Forwarded-For": "198.51.100.1"},
+                )
+                assert resp.status_code == 200, f"Scenario {s_id} failed with {resp.status_code}: {resp.text}"
+                data = resp.json()
+                assert data["outcome"] == exp["outcome"], f"{s_id}: outcome {data['outcome']} != {exp['outcome']}"
+                assert data["verdict"] == exp["verdict"], f"{s_id}: verdict {data['verdict']} != {exp['verdict']}"
+                assert data["reason"] == exp["reason"], f"{s_id}: reason {data['reason']} != {exp['reason']}"
+                assert_no_forbidden_keys(data, path=f"/agent/attempt/{s_id}")
+
+            counts_after = {c: await db[c].count_documents({}) for c in colls}
+            for c in colls:
+                assert counts_before[c] == counts_after[c], (
+                    f"Collection {c} mutated by scenario execution: before={counts_before[c]}, after={counts_after[c]}"
+                )
+        print("  [PASS] Agent Gateway: all 7 attack scenarios return expected verdict & reason with zero writes to business collections")
+
+        # 17.2 Unknown tool refused and audited
+        refusal = await dispatch_tool("unregistered_exploit_tool", {"action": "drop_tables"}, client_key_hash="integ_probe", db=db)
+        assert refusal["outcome"] == "refused"
+        assert refusal["reason"] == "not offered"
+        unk_audit = await db.agent_audit.find_one({"tool": "unregistered_exploit_tool"})
+        assert unk_audit is not None
+        assert unk_audit["outcome"] == "refused"
+        assert unk_audit["reason"] == "not offered"
+        print("  [PASS] Agent Gateway: unknown tool refused with 'not offered' and audited in agent_audit on MongoDB")
+
+        # 17.3 Argument validation and injection rejection
+        val_pass = validate_safe_string("valid_event_id_123", field_name="event_id", max_len=128) == "valid_event_id_123"
+        assert val_pass
+        val_oversized = False
+        try:
+            validate_safe_string("x" * 200, field_name="event_id", max_len=128)
+        except ValueError:
+            val_oversized = True
+        assert val_oversized
+
+        injections = [
+            "evt_1; DROP TABLE events; --",
+            "<script>alert(1)</script>",
+            "evt_{$gt: ''}",
+            "evt\x00_null",
+            "evt' OR 1=1 --",
+            '{"$ne": null}',
+        ]
+        injections_blocked = 0
+        for inj in injections:
+            try:
+                validate_safe_string(inj, field_name="event_id", max_len=128)
+            except ValueError:
+                injections_blocked += 1
+        assert injections_blocked == len(injections)
+
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as agent_client:
+            r_inj = await agent_client.post(
+                "/agent/attempt",
+                json={"scenario_id": "normal_49_authorized; DROP TABLE events; --"},
+                headers={"X-Forwarded-For": "198.51.100.2"},
+            )
+            assert r_inj.status_code in (400, 422), f"Injected scenario id returned {r_inj.status_code}"
+        print("  [PASS] Agent Gateway: argument validation enforces event_id patterns, lengths, and rejects 6 injection patterns")
+
+        # 17.4 Limits: 10/min per client, 11th throttled with 429 Retry-After
+        test_ip = "198.51.100.77"
+        await db.agent_counters.delete_many({"key": {"$regex": test_ip}})
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as agent_client:
+            for i in range(CLIENT_LIMIT_PER_MINUTE):
+                r_lim_ok = await agent_client.post(
+                    "/agent/attempt",
+                    json={"scenario_id": "normal_49_authorized"},
+                    headers={"X-Forwarded-For": test_ip},
+                )
+                assert r_lim_ok.status_code == 200, f"Request {i+1} failed: {r_lim_ok.status_code}"
+
+            r_lim_429 = await agent_client.post(
+                "/agent/attempt",
+                json={"scenario_id": "normal_49_authorized"},
+                headers={"X-Forwarded-For": test_ip},
+            )
+            assert r_lim_429.status_code == 429, f"11th request expected 429, got {r_lim_429.status_code}"
+            assert "Retry-After" in r_lim_429.headers
+            assert "Client rate limit exceeded" in r_lim_429.json().get("detail", "")
+
+            r_other = await agent_client.post(
+                "/agent/attempt",
+                json={"scenario_id": "normal_49_authorized"},
+                headers={"X-Forwarded-For": "198.51.100.78"},
+            )
+            assert r_other.status_code == 200
+        print("  [PASS] Agent Gateway: atomic rolling rate limit on real MongoDB (10/min allowed, 11th returns 429 Retry-After)")
+
+        # 17.5 Audit rows inspection & Sanitization key scan
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as agent_client:
+            r_scenarios = await agent_client.get("/agent/scenarios")
+            assert r_scenarios.status_code == 200
+            scenarios_data = r_scenarios.json()
+            assert isinstance(scenarios_data, list) and len(scenarios_data) >= 7
+            assert_no_forbidden_keys(scenarios_data, path="/agent/scenarios")
+
+            r_audit = await agent_client.get("/agent/audit?limit=50")
+            assert r_audit.status_code == 200
+            audit_data = r_audit.json()
+            assert isinstance(audit_data, list) and len(audit_data) > 0
+            assert_no_forbidden_keys(audit_data, path="/agent/audit")
+
+            sample = audit_data[0]
+            required_audit_keys = {"agent_id", "tool", "outcome", "reason", "args_hash", "rulebook_fingerprint", "at"}
+            assert required_audit_keys.issubset(set(sample.keys())), f"Missing keys in audit record: {sample.keys()}"
+        print("  [PASS] Agent Gateway: audit inspection & recursive sanitization scan pass with zero forbidden keys")
+
+        # 17.6 Demo reset clears agent collections and re-ensures indexes
+        res_reset_agent = await reset_demo_database(db)
+        assert res_reset_agent["status"] == "ok"
+        count_audit = await db.agent_audit.count_documents({})
+        count_counters = await db.agent_counters.count_documents({})
+        assert count_audit == 0, f"agent_audit not cleared: {count_audit}"
+        assert count_counters == 0, f"agent_counters not cleared: {count_counters}"
+        audit_idx_after = await db.agent_audit.index_information()
+        assert any(v.get("expireAfterSeconds") == 2592000 for v in audit_idx_after.values())
+        print("  [PASS] Agent Gateway: demo reset purges agent_audit and agent_counters and re-ensures TTL indexes")
+
         # Cleanup test documents
         await db.demo_runs.delete_many({})
         await db.demo_counters.delete_many({})
         await db.rulebook_versions.delete_many({})
         await db.rules_rate_limits.delete_many({})
+        await db.agent_audit.delete_many({})
+        await db.agent_counters.delete_many({})
 
         print("\n" + "=" * 78)
-        print("RESULT: ALL INTEGRATION CHECKS PASSED (27/27)")
+        print("RESULT: ALL INTEGRATION CHECKS PASSED (28/28)")
         print("=" * 78)
         return 0
 
