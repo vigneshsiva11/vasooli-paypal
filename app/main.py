@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """Vasooli — FastAPI application entrypoint.
 
 Wires up configuration, the MongoDB connection lifecycle, the health-check route,
@@ -6,7 +8,7 @@ policy → execution → verification → promise-to-pay) live in their own pack
 under `app/`, with the read-only metrics and audit layer mounted last.
 """
 
-from __future__ import annotations
+from app.gateway.mcp_server import get_mcp_app, mcp_server
 
 import asyncio
 import logging
@@ -109,8 +111,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             )
 
     try:
-        yield
+        session_mgr = getattr(mcp_server, 'session_manager', None)
+        if session_mgr is not None:
+            session_mgr._has_started = False
+            async with session_mgr.run():
+                yield
+        else:
+            yield
     finally:
+        session_mgr = getattr(mcp_server, 'session_manager', None)
+        if session_mgr is not None:
+            session_mgr._has_started = False
         await close_mongo_connection()
 
 
@@ -163,6 +174,10 @@ app.include_router(sim.router)
 app.include_router(demo.router)
 # Agent Gateway router
 app.include_router(agent.router)
+
+# Mount MCP server over Streamable HTTP at /mcp
+mcp_sub_app = get_mcp_app()
+app.mount("/mcp", mcp_sub_app)
 
 
 @app.get("/", tags=["health"])

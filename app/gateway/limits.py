@@ -178,3 +178,68 @@ async def check_and_record_attempt(
 def clear_limits() -> None:
     """Clear in-memory counters for testing."""
     _OFFLINE_COUNTERS.clear()
+
+TOKEN_LIMIT_PER_MINUTE = 60
+TOKEN_WINDOW_SECONDS = 60
+
+
+async def check_and_record_token_attempt(
+    token_hash: str,
+    db: Any = None,
+) -> tuple[bool, str | None, int | None]:
+    """Check and record rolling rate limit for an MCP agent token (60/min).
+
+    Returns: (allowed, error_message, retry_after_seconds)
+    """
+    token_counter_key = f"token:{token_hash}"
+    current_time = _utc_now()
+    one_minute_ago = current_time - timedelta(seconds=TOKEN_WINDOW_SECONDS)
+
+    database = db
+    if database is None:
+        try:
+            database = get_database()
+        except Exception:
+            database = None
+
+    if database is not None:
+        col = database[COUNTERS_COLLECTION]
+        token_count = await col.count_documents({
+            "key": token_counter_key,
+            "created_at": {"$gte": one_minute_ago},
+        })
+        if token_count >= TOKEN_LIMIT_PER_MINUTE:
+            oldest = await col.find_one(
+                {"key": token_counter_key, "created_at": {"$gte": one_minute_ago}},
+                sort=[("created_at", ASCENDING)],
+            )
+            oldest_ts = _parse_ts(oldest["created_at"]) if oldest else one_minute_ago
+            elapsed = (current_time - oldest_ts).total_seconds()
+            retry_after = max(1, math.ceil(TOKEN_WINDOW_SECONDS - elapsed))
+            return (
+                False,
+                f"Token rate limit exceeded: maximum {TOKEN_LIMIT_PER_MINUTE} calls per minute per token.",
+                retry_after,
+            )
+
+        await col.insert_one({"key": token_counter_key, "created_at": current_time})
+        return (True, None, None)
+
+    # Offline / in-memory path
+    token_records = [
+        r for r in _OFFLINE_COUNTERS
+        if r["key"] == token_counter_key and r["created_at"] >= one_minute_ago
+    ]
+    if len(token_records) >= TOKEN_LIMIT_PER_MINUTE:
+        oldest_ts = min(r["created_at"] for r in token_records)
+        elapsed = (current_time - oldest_ts).total_seconds()
+        retry_after = max(1, math.ceil(TOKEN_WINDOW_SECONDS - elapsed))
+        return (
+            False,
+            f"Token rate limit exceeded: maximum {TOKEN_LIMIT_PER_MINUTE} calls per minute per token.",
+            retry_after,
+        )
+
+    _OFFLINE_COUNTERS.append({"key": token_counter_key, "created_at": current_time})
+    return (True, None, None)
+

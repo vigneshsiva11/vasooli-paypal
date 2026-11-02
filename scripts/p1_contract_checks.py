@@ -5450,6 +5450,284 @@ def test_step14_agent_gateway() -> None:
     asyncio.run(_run_offline_step14())
 
 
+def test_step15_mcp_server() -> None:
+    print("\n--- SECTION 15: MODEL CONTEXT PROTOCOL (MCP) SERVER (OFFLINE) ---")
+    import importlib.metadata
+    from datetime import datetime, timezone
+    from bson import ObjectId
+    import mcp
+    from mcp import Client
+    from app.gateway.mcp_server import create_mcp_server
+    from app.gateway.tools import ALLOWED_TOOLS
+    from app.gateway.limits import TOKEN_LIMIT_PER_MINUTE, check_and_record_token_attempt, clear_limits
+    from app.gateway.audit import get_recent_audit_records
+
+    # 15.1 Official MCP Python SDK version check
+    sdk_version = importlib.metadata.version("mcp")
+    version_ok = sdk_version >= "2.0.0"
+    report(
+        "15.1 Official MCP Python SDK version is >= 2.0.0",
+        version_ok,
+        f"mcp_version={sdk_version}",
+    )
+
+    async def _run_offline_step15() -> None:
+        server = create_mcp_server()
+
+        # 15.2 In-memory Client tool list equals ALLOWED_TOOLS
+        async with Client(server) as client:
+            tools_resp = await client.list_tools()
+            tool_names = set(t.name for t in tools_resp.tools)
+            list_ok = tool_names == ALLOWED_TOOLS
+            report(
+                "15.2 In-memory MCP Client tool list equals ALLOWED_TOOLS allowlist exactly",
+                list_ok,
+                f"tools={tool_names}",
+            )
+
+            # 15.3 Tool list contains none of forbidden admin/pipeline/PayPal tools
+            forbidden = {
+                "apply_rules",
+                "revert",
+                "reset",
+                "advance_clock",
+                "tick",
+                "run_scenario",
+                "create_order",
+                "capture_order",
+                "refund_order",
+                "execute",
+            }
+            no_forbidden = tool_names.isdisjoint(forbidden)
+            report(
+                "15.3 In-memory MCP tool list contains NONE of forbidden admin, pipeline or raw tools",
+                no_forbidden,
+                f"intersection={tool_names.intersection(forbidden)}",
+            )
+
+            # 15.4 In-memory tool calls return gateway verdict and are audited
+            # Tool: get_active_rules
+            res_rules = await client.call_tool("get_active_rules", {"currency": "USD"})
+            assert res_rules.content and len(res_rules.content) > 0
+            rules_data = json.loads(res_rules.content[0].text)
+            rules_verdict_ok = (
+                rules_data.get("outcome") == "allowed"
+                and rules_data.get("verdict") == "authorized"
+                and rules_data.get("rules", {}).get("tier_currency") == "USD"
+            )
+
+            # Tool: propose_recovery
+            res_recovery = await client.call_tool(
+                "propose_recovery",
+                {
+                    "event": {
+                        "event_id": "evt_mcp_normal_49",
+                        "surface": "subscription",
+                        "amount": 49.00,
+                        "currency": "USD",
+                        "customer_ref": "cust_mcp_49",
+                        "raw_failure_reason": "insufficient_funds",
+                        "gateway": "paypal",
+                    },
+                    "context": {
+                        "customer_ref": "cust_mcp_49",
+                        "customer_opted_out": False,
+                        "prior_authorized_contacts": 0,
+                        "last_authorized_contact_at": None,
+                        "has_vault_token": True,
+                        "processor_response_code": "5120",
+                    },
+                },
+            )
+            recovery_data = json.loads(res_recovery.content[0].text)
+            recovery_verdict_ok = (
+                recovery_data.get("verdict") == "authorized"
+                and recovery_data.get("reason") == "ok"
+                and "checks" in recovery_data
+                and "rulebook_fingerprint" in recovery_data
+            )
+
+            # Tool: execute_recovery on attack-range scenario event is refused
+            fake_verdict_doc = {
+                "_id": str(ObjectId()),
+                "event_id": "atk_scenario_attack_range_evt",
+                "version": 1,
+                "decision_id": str(ObjectId()),
+                "decision_version": 1,
+                "verdict": "authorized",
+                "reason": "ok",
+                "checks_performed": [
+                    "decision_is_actionable: PASS (ok)",
+                    "customer_opt_out: PASS (ok)",
+                    "contact_cap: PASS (ok)",
+                    "contact_cooldown: PASS (ok)",
+                    "erv_minimum: PASS (ok)",
+                    "amount_tier: PASS (ok)",
+                ],
+                "evaluated_at": datetime.now(timezone.utc).isoformat(),
+                "rulebook_fingerprint": "rb1_8221b1b9069ffc80",
+            }
+            res_exec_atk = await client.call_tool(
+                "execute_recovery",
+                {
+                    "verdict": fake_verdict_doc,
+                    "event_id": "atk_scenario_attack_range_evt",
+                },
+            )
+            exec_atk_data = json.loads(res_exec_atk.content[0].text)
+            exec_refused_ok = (
+                exec_atk_data.get("outcome") == "refused"
+                and exec_atk_data.get("reason") == "attack_range_scenario_refused"
+            )
+
+            # Verify auditing of all calls
+            recent_audit = await get_recent_audit_records(limit=20)
+            mcp_audit_tools = [r.get("tool") for r in recent_audit if r.get("agent_id") == "mcp_gateway"]
+            audited_ok = (
+                "get_active_rules" in mcp_audit_tools
+                and "propose_recovery" in mcp_audit_tools
+                and "execute_recovery" in mcp_audit_tools
+            )
+
+            report(
+                "15.4 In-memory tool calls return gateway verdict and are recorded in audit",
+                rules_verdict_ok and recovery_verdict_ok and exec_refused_ok and audited_ok,
+                f"rules_ok={rules_verdict_ok}, recovery_ok={recovery_verdict_ok}, exec_atk_ok={exec_refused_ok}, audited={audited_ok}",
+            )
+
+        # 15.5 Bearer auth on /mcp (PublicDemoMiddleware)
+        from fastapi import FastAPI
+        from starlette.testclient import TestClient
+        from app.config import Settings
+        from app.middleware import PublicDemoMiddleware
+
+        def build_mcp_test_app(settings: Settings) -> TestClient:
+            test_app = FastAPI()
+            test_app.add_middleware(PublicDemoMiddleware, settings=settings)
+
+            @test_app.post("/mcp")
+            async def mock_mcp():
+                return {"status": "mcp_ok"}
+
+            @test_app.post("/other")
+            async def mock_other():
+                return {"status": "other_ok"}
+
+            return TestClient(test_app)
+
+        s_valid = Settings(
+            public_demo=True,
+            admin_token="admin_secret",
+            agent_token="agent_super_secret_token",
+            paypal_env="sandbox",
+        )
+        c_mcp = build_mcp_test_app(s_valid)
+
+        # Missing token -> 401
+        r_no_token = c_mcp.post("/mcp", json={})
+        # Wrong token -> 401
+        r_wrong_token = c_mcp.post(
+            "/mcp",
+            json={},
+            headers={"Authorization": "Bearer totally_wrong_token"},
+        )
+        # Correct token -> passes auth (200 OK from endpoint, does not require admin token)
+        r_valid_token = c_mcp.post(
+            "/mcp",
+            json={},
+            headers={"Authorization": "Bearer agent_super_secret_token"},
+        )
+        # Sibling route still requires admin token under public_demo
+        r_other = c_mcp.post("/other", json={})
+
+        auth_ok = (
+            r_no_token.status_code == 401
+            and r_no_token.headers.get("www-authenticate") == "Bearer"
+            and r_wrong_token.status_code == 401
+            and r_wrong_token.headers.get("www-authenticate") == "Bearer"
+            and r_valid_token.status_code == 200
+            and r_valid_token.json().get("status") == "mcp_ok"
+            and r_other.status_code == 401
+        )
+        report(
+            "15.5 Bearer auth on /mcp: missing token -> 401, wrong token -> 401, valid token passes without admin token",
+            auth_ok,
+            f"no_token={r_no_token.status_code}, wrong_token={r_wrong_token.status_code}, valid_token={r_valid_token.status_code}, sibling={r_other.status_code}",
+        )
+
+        # 15.6 Production fail-closed: 503 when AGENT_TOKEN is unset in production
+        s_prod = Settings(
+            environment="production",
+            public_demo=True,
+            admin_token="admin_secret",
+            agent_token="",
+            paypal_env="sandbox",
+        )
+        c_prod = build_mcp_test_app(s_prod)
+        r_prod_unset = c_prod.post(
+            "/mcp",
+            json={},
+            headers={"Authorization": "Bearer any_token"},
+        )
+        prod_503_ok = (
+            r_prod_unset.status_code == 503
+            and r_prod_unset.json().get("code") == "agent_token_missing"
+        )
+        report(
+            "15.6 Production fail-closed: 503 when AGENT_TOKEN is unset in production",
+            prod_503_ok,
+            f"prod_status={r_prod_unset.status_code}, code={r_prod_unset.json().get('code')}",
+        )
+
+        # 15.7 Rate limit: 60 calls per minute per token
+        clear_limits()
+        dummy_hash = "token_hash_offline_rate_limit_test"
+        for _ in range(60):
+            allowed, _, _ = await check_and_record_token_attempt(dummy_hash)
+            assert allowed
+        allowed_61, err, retry_after = await check_and_record_token_attempt(dummy_hash)
+        other_allowed, _, _ = await check_and_record_token_attempt("other_token_hash")
+        rate_limit_ok = (
+            not allowed_61
+            and "Token rate limit exceeded" in (err or "")
+            and retry_after == 60
+            and other_allowed
+        )
+        report(
+            "15.7 Rate limit: 60 calls/min per token allowed, 61st returns False with Retry-After=60, other token allowed",
+            rate_limit_ok,
+            f"allowed_61={allowed_61}, retry_after={retry_after}, other_allowed={other_allowed}",
+        )
+
+        # 15.8 CORS preflight for /mcp
+        from fastapi import FastAPI
+        from fastapi.middleware.cors import CORSMiddleware
+        cors_app = FastAPI()
+        cors_app.add_middleware(
+            CORSMiddleware,
+            allow_origins=["https://mcp.vasooli.example"],
+            allow_credentials=True,
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
+        c_client = TestClient(cors_app)
+        r_cors = c_client.options(
+            "/mcp",
+            headers={
+                "Origin": "https://mcp.vasooli.example",
+                "Access-Control-Request-Method": "POST",
+                "Access-Control-Request-Headers": "Authorization,Content-Type",
+            },
+        )
+        report(
+            "15.8 CORS preflight on /mcp: allowed for configured origins without requiring auth",
+            r_cors.status_code == 200 and r_cors.headers.get("access-control-allow-origin") == "https://mcp.vasooli.example",
+            f"cors_status={r_cors.status_code}",
+        )
+
+    asyncio.run(_run_offline_step15())
+
+
 def main() -> int:
     print("=" * 78)
     print("PHASE 1 CONTRACT CHECKS (OFFLINE — NO NETWORK, NO DB, NO SERVER)")
@@ -5469,6 +5747,7 @@ def main() -> int:
     test_step12_public_runs_and_sanitization()
     test_step13_rule_validator()
     test_step14_agent_gateway()
+    test_step15_mcp_server()
 
     print("\n" + "=" * 78)
     print(f"SUMMARY: {PASS_COUNT} PASSED, {FAIL_COUNT} FAILED")

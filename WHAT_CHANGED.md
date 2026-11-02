@@ -58,3 +58,7 @@ Baseline: the original Vasooli repository at tag `razorpay-buildathon-submission
 ## 2026-10-28/29: Frontend
 - Mission Control page with replay, AG Grid ledger and audit grids, USD formatting, audit-trail defaults and error messages, 24 frontend tests.
 - Fixed a live 500: a field written by the reconciler was undeclared on the execution read model; added a write/read symmetry test and a public API smoke test.
+
+## 2026-11-02: Agent gateway
+- Shared gateway tool core with seven in-memory attack scenarios that write nothing, an audit collection, and a rate-limited public REST adapter.
+- MCP server at /mcp with a bearer agent token and an allowlisted tool list; every call audited.

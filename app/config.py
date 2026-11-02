@@ -30,7 +30,7 @@ class SecurityAwareEnvSource(EnvSettingsSource):
         vars_dict = dict(super()._load_env_vars())
         for key, val in os.environ.items():
             norm_key = key if self.case_sensitive else key.lower()
-            if norm_key in ("public_demo", "admin_token", "public_runs"):
+            if norm_key in ("public_demo", "admin_token", "public_runs", "agent_token"):
                 if val == "" or val is None:
                     vars_dict[norm_key] = ""
         return vars_dict
@@ -58,7 +58,7 @@ class SecurityAwareDotEnvSource(DotEnvSettingsSource):
                 )
                 for k, v in raw.items():
                     norm_key = k if self.case_sensitive else k.lower()
-                    if norm_key in ("public_demo", "admin_token", "public_runs") and v == "":
+                    if norm_key in ("public_demo", "admin_token", "public_runs", "agent_token") and v == "":
                         vars_dict[norm_key] = ""
         return vars_dict
 
@@ -87,6 +87,7 @@ class Settings(BaseSettings):
     public_demo: bool = False
     public_runs: bool = False
     admin_token: str = ""
+    agent_token: str = ""
     render: str = ""
     cors_origins: Annotated[list[str], NoDecode] = Field(default_factory=list)
 
@@ -134,7 +135,7 @@ class Settings(BaseSettings):
             return v
         return bool(v)
 
-    @field_validator("admin_token", mode="before")
+    @field_validator("admin_token", "agent_token", mode="before")
     @classmethod
     def _parse_admin_token(cls, v: Any) -> str:
         if v is None:

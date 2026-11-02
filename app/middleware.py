@@ -46,7 +46,61 @@ class PublicDemoMiddleware(BaseHTTPMiddleware):
     async def dispatch(
         self, request: Request, call_next: RequestResponseEndpoint
     ) -> Response:
+        path = request.url.path.rstrip("/")
         current_settings = self._get_settings()
+
+        # MCP server endpoint: exact path with its own bearer auth and 60/min rate limit
+        if path == "/mcp" or path.startswith("/mcp/"):
+            # OPTIONS requests stay public for CORS preflight
+            if request.method == "OPTIONS":
+                return await call_next(request)
+
+            expected_agent_token = (getattr(current_settings, "agent_token", "") or "").strip()
+
+            # 503 when unset in production (fail-closed); 401 otherwise (never logged)
+            if current_settings.is_production and not expected_agent_token:
+                logger.warning("MCP request rejected: AGENT_TOKEN is unset in production (503 fail-closed)")
+                return JSONResponse(
+                    status_code=503,
+                    content={
+                        "detail": "Service unavailable: agent token not configured in production",
+                        "code": "agent_token_missing",
+                    },
+                )
+
+            auth_header = request.headers.get("Authorization") or ""
+            if not auth_header.startswith("Bearer "):
+                return JSONResponse(
+                    status_code=401,
+                    headers={"WWW-Authenticate": "Bearer"},
+                    content={"detail": "Unauthorized: Bearer token required", "code": "bearer_token_required"},
+                )
+
+            provided_token = auth_header[7:].strip()
+            if not expected_agent_token or not hmac.compare_digest(
+                provided_token.encode("utf-8"), expected_agent_token.encode("utf-8")
+            ):
+                return JSONResponse(
+                    status_code=401,
+                    headers={"WWW-Authenticate": "Bearer"},
+                    content={"detail": "Unauthorized: invalid bearer token", "code": "invalid_bearer_token"},
+                )
+
+            # 60 calls per minute per token
+            import hashlib
+            from app.gateway.limits import check_and_record_token_attempt
+            token_hash = hashlib.sha256(provided_token.encode("utf-8")).hexdigest()
+            allowed, err_msg, retry_after = await check_and_record_token_attempt(token_hash)
+            if not allowed:
+                headers = {"Retry-After": str(retry_after or 60)}
+                return JSONResponse(
+                    status_code=429,
+                    headers=headers,
+                    content={"detail": err_msg or "Token rate limit exceeded.", "code": "token_rate_limit_exceeded"},
+                )
+
+            return await call_next(request)
+
         if not current_settings.public_demo:
             return await call_next(request)
 

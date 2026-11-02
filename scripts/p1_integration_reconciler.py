@@ -1490,6 +1490,173 @@ async def run_integration_check() -> int:
             assert required_audit_keys.issubset(set(sample.keys())), f"Missing keys in audit record: {sample.keys()}"
         print("  [PASS] Agent Gateway: audit inspection & recursive sanitization scan pass with zero forbidden keys")
 
+        # -----------------------------------------------------------------------
+        # Step 18: MCP Server over Streamable HTTP & Real MongoDB Checks
+        # -----------------------------------------------------------------------
+        print("\n--- STEP 18: MCP SERVER INTEGRATION CHECKS (REAL MONGODB) ---")
+        from mcp import Client
+        from starlette.middleware import Middleware
+        from starlette.applications import Starlette
+        from starlette.responses import JSONResponse
+        from starlette.routing import Route
+        from app.gateway.mcp_server import create_mcp_server
+        from app.gateway.tools import ALLOWED_TOOLS
+        from app.gateway.limits import check_and_record_token_attempt
+        from app.middleware import PublicDemoMiddleware
+        import hashlib
+
+        # 18.1 In-memory Client tool list and execution against real MongoDB
+        mcp_test_server = create_mcp_server()
+        async with Client(mcp_test_server) as inmem_client:
+            tools_resp = await inmem_client.list_tools()
+            tool_names = set(t.name for t in tools_resp.tools)
+            assert tool_names == ALLOWED_TOOLS, f"Mismatch in tool names: {tool_names}"
+
+            forbidden_tools = {
+                "apply_rules", "revert", "reset", "advance_clock", "tick", "run_scenario",
+                "create_order", "capture_order", "refund_order", "execute",
+            }
+            assert tool_names.isdisjoint(forbidden_tools)
+
+            # Record collection counts before MCP tool executions
+            ev_count_before = await db.events.count_documents({})
+            exec_count_before = await db.executions.count_documents({})
+            verdict_count_before = await db.policy_verdicts.count_documents({})
+
+            # Execute tool: get_active_rules
+            res_rules = await inmem_client.call_tool("get_active_rules", {"currency": "USD"})
+            assert res_rules.content
+            rules_val = json.loads(res_rules.content[0].text)
+            assert rules_val.get("outcome") == "allowed"
+
+            # Execute tool: propose_recovery (normal)
+            res_rec = await inmem_client.call_tool(
+                "propose_recovery",
+                {
+                    "event": {
+                        "event_id": "evt_mcp_integ_normal",
+                        "surface": "subscription",
+                        "amount": 49.00,
+                        "currency": "USD",
+                        "customer_ref": "cust_mcp_integ",
+                        "raw_failure_reason": "insufficient_funds",
+                        "gateway": "paypal",
+                    },
+                    "context": {
+                        "customer_ref": "cust_mcp_integ",
+                        "customer_opted_out": False,
+                        "prior_authorized_contacts": 0,
+                        "last_authorized_contact_at": None,
+                        "has_vault_token": True,
+                        "processor_response_code": "5120",
+                    },
+                },
+            )
+            rec_val = json.loads(res_rec.content[0].text)
+            assert rec_val.get("verdict") == "authorized"
+
+            # Execute tool: execute_recovery on attack-range event is refused
+            fake_atk_verdict = {
+                "_id": str(ObjectId()),
+                "event_id": "atk_scenario_mcp_integ",
+                "version": 1,
+                "decision_id": str(ObjectId()),
+                "decision_version": 1,
+                "verdict": "authorized",
+                "reason": "ok",
+                "checks_performed": [
+                    "decision_is_actionable: PASS (ok)",
+                    "customer_opt_out: PASS (ok)",
+                    "contact_cap: PASS (ok)",
+                    "contact_cooldown: PASS (ok)",
+                    "erv_minimum: PASS (ok)",
+                    "amount_tier: PASS (ok)",
+                ],
+                "evaluated_at": datetime.now(timezone.utc).isoformat(),
+                "rulebook_fingerprint": "rb1_8221b1b9069ffc80",
+            }
+            res_atk_exec = await inmem_client.call_tool(
+                "execute_recovery",
+                {
+                    "verdict": fake_atk_verdict,
+                    "event_id": "atk_scenario_mcp_integ",
+                },
+            )
+            atk_exec_val = json.loads(res_atk_exec.content[0].text)
+            assert atk_exec_val.get("outcome") == "refused"
+            assert atk_exec_val.get("reason") == "attack_range_scenario_refused"
+
+            # Verify zero writes to business collections
+            assert await db.events.count_documents({}) == ev_count_before
+            assert await db.executions.count_documents({}) == exec_count_before
+            assert await db.policy_verdicts.count_documents({}) == verdict_count_before
+
+            # Verify audit records written to real MongoDB
+            audit_records = await db.agent_audit.find({"agent_id": "mcp_gateway"}).to_list(length=100)
+            assert len(audit_records) >= 3
+            audited_tools = {r["tool"] for r in audit_records}
+            assert "get_active_rules" in audited_tools
+            assert "propose_recovery" in audited_tools
+            assert "execute_recovery" in audited_tools
+        print("  [PASS] MCP Server: tools list strictly equals allowlist, calls return verdicts & audited in real MongoDB with zero business writes")
+
+        # 18.2 Bearer Auth & Middleware verification on /mcp
+        async def _mock_mcp_endpoint(request):
+            return JSONResponse({"status": "mcp_admitted"})
+
+        mcp_auth_test_app = Starlette(
+            routes=[Route("/mcp", _mock_mcp_endpoint, methods=["GET", "POST", "OPTIONS"])],
+            middleware=[
+                Middleware(
+                    PublicDemoMiddleware,
+                    settings=Settings(
+                        public_demo=True,
+                        admin_token="admin_tok_integ",
+                        agent_token="agent_tok_integ_secret",
+                        paypal_env="sandbox",
+                    ),
+                )
+            ],
+        )
+        mcp_transport = httpx.ASGITransport(app=mcp_auth_test_app)
+        async with httpx.AsyncClient(transport=mcp_transport, base_url="http://test") as mcp_http_client:
+            # Missing token -> 401
+            r_no_tok = await mcp_http_client.post("/mcp", json={})
+            assert r_no_tok.status_code == 401
+            assert r_no_tok.headers.get("www-authenticate") == "Bearer"
+
+            # Wrong token -> 401
+            r_bad_tok = await mcp_http_client.post(
+                "/mcp",
+                json={},
+                headers={"Authorization": "Bearer bad_secret"},
+            )
+            assert r_bad_tok.status_code == 401
+
+            # Valid token -> 200
+            r_good_tok = await mcp_http_client.post(
+                "/mcp",
+                json={},
+                headers={"Authorization": "Bearer agent_tok_integ_secret"},
+            )
+            assert r_good_tok.status_code == 200
+            assert r_good_tok.json().get("status") == "mcp_admitted"
+        print("  [PASS] MCP Server: Bearer auth on /mcp enforced (401 without token, 401 with bad token, 200 with valid token)")
+
+        # 18.3 Token rate limit on real MongoDB (60 calls/min per token)
+        test_tok_hash = hashlib.sha256(b"token_integ_rate_limit_test").hexdigest()
+        await db.agent_counters.delete_many({"key": f"token:{test_tok_hash}"})
+        for _ in range(60):
+            allowed, _, _ = await check_and_record_token_attempt(test_tok_hash, db=db)
+            assert allowed, "Expected call within 60 limit to succeed"
+        allowed_61, err_msg, retry_after = await check_and_record_token_attempt(test_tok_hash, db=db)
+        assert not allowed_61, "61st call must be blocked"
+        assert "Token rate limit exceeded" in (err_msg or "")
+        assert 1 <= (retry_after or 0) <= 60
+        count_docs = await db.agent_counters.count_documents({"key": f"token:{test_tok_hash}"})
+        assert count_docs == 60
+        print("  [PASS] MCP Server: token rate limit strictly enforced on real MongoDB (60/min allowed, 61st rejected with 429 Retry-After)")
+
         # 17.6 Demo reset clears agent collections and re-ensures indexes
         res_reset_agent = await reset_demo_database(db)
         assert res_reset_agent["status"] == "ok"
@@ -1510,7 +1677,7 @@ async def run_integration_check() -> int:
         await db.agent_counters.delete_many({})
 
         print("\n" + "=" * 78)
-        print("RESULT: ALL INTEGRATION CHECKS PASSED (28/28)")
+        print("RESULT: ALL INTEGRATION CHECKS PASSED (31/31)")
         print("=" * 78)
         return 0
 
