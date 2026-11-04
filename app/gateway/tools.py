@@ -7,6 +7,8 @@ Functions:
 - propose_recovery: dry-run evaluation of recovery intervention using real pure functions.
 - propose_contact: dry-run evaluation of contact intervention using real pure functions.
 - execute_recovery: strictly guarded execution requiring AuthorizedVerdict through structural path.
+- list_attack_scenarios: lists in-memory catalogue attack scenarios, dry-run only.
+- run_attack_scenario: executes a catalogue attack scenario in-memory, dry-run only.
 - dispatch_tool: tool registry dispatcher that audits and refuses unknown tools.
 """
 
@@ -18,6 +20,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping, Optional
 
 from bson import ObjectId
+import pydantic
+from pydantic import ValidationError
 
 from app.config import get_settings
 from app.db import get_database
@@ -28,7 +32,7 @@ from app.gateway.audit import record_audit
 from app.models import DecisionRecord, DiagnosisRecord, RevenueEvent, expected_recovery_value
 from app.models.decision import Decision
 from app.models.diagnosis import is_recoverable
-from app.models.execution import AuthorizedVerdict, require_authorized
+from app.models.execution import AuthorizedVerdict, NotAuthorized, require_authorized
 from app.models.policy import PolicyVerdict
 from app.policy.engine import PolicyContext, evaluate as evaluate_policy
 from app.policy.rulebook_store import get_active_usd_rulebook
@@ -44,6 +48,8 @@ ALLOWED_TOOLS = frozenset({
     "propose_recovery",
     "propose_contact",
     "execute_recovery",
+    "list_attack_scenarios",
+    "run_attack_scenario",
 })
 
 RAW_CUSTOMER_TEXT_KEYS = frozenset({
@@ -71,6 +77,36 @@ _EVENT_EXECUTION_TIMESTAMPS: dict[str, datetime] = {}
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def format_pydantic_error(exc: pydantic.ValidationError) -> str:
+    """Format a Pydantic ValidationError into clean, plain text with field names only.
+
+    Never includes class names, raw Pydantic messages, or URLs.
+    Example output: 'invalid input: missing fields event_id, surface, amount, customer_ref'
+    """
+    missing: list[str] = []
+    invalid: list[str] = []
+
+    for err in exc.errors():
+        loc = err.get("loc", ())
+        field_name = str(loc[-1]) if loc else "field"
+        err_type = str(err.get("type", ""))
+        if "missing" in err_type:
+            if field_name not in missing:
+                missing.append(field_name)
+        else:
+            if field_name not in invalid and field_name not in missing:
+                invalid.append(field_name)
+
+    parts: list[str] = []
+    if missing:
+        parts.append(f"missing fields {', '.join(missing)}")
+    if invalid:
+        parts.append(f"invalid fields {', '.join(invalid)}")
+
+    detail = "; ".join(parts) if parts else "malformed payload"
+    return f"invalid input: {detail}"
 
 
 def validate_safe_string(val: Any, field_name: str = "id", max_len: int = 128) -> str:
@@ -119,9 +155,25 @@ def is_attack_range_identifier(identifier: str) -> bool:
     return False
 
 
-async def list_at_risk_events(limit: int = 50, db: Any = None) -> list[dict[str, Any]]:
-    """List events currently in 'at_risk' status, sanitized and stripped of customer text."""
-    capped_limit = max(1, min(limit, 50))
+async def list_at_risk_events(limit: int | Any = 50, db: Any = None) -> list[dict[str, Any]] | dict[str, Any]:
+    """List revenue events currently in 'at_risk' status, sanitized and stripped of customer text.
+
+    Input shape:
+    {"limit": 50}
+
+    Example:
+    {"limit": 10}
+    """
+    try:
+        capped_limit = max(1, min(int(limit), 50))
+    except (ValueError, TypeError):
+        return {
+            "outcome": "refused",
+            "reason": "invalid input: invalid fields limit",
+            "verdict": "refused",
+            "check": "input_validation",
+        }
+
     database = db
     if database is None:
         try:
@@ -142,9 +194,37 @@ async def list_at_risk_events(limit: int = 50, db: Any = None) -> list[dict[str,
     return [sanitize_agent_output(evt) for evt in events]
 
 
-async def get_event_audit(event_id: str, db: Any = None) -> dict[str, Any] | None:
-    """Retrieve complete audit history for event_id, sanitized, stripped of customer text."""
-    clean_event_id = validate_safe_string(event_id, field_name="event_id", max_len=128)
+async def get_event_audit(event_id: str | Any = None, db: Any = None) -> dict[str, Any] | None:
+    """Retrieve complete audit history for event_id, sanitized, stripped of customer text.
+
+    Input shape:
+    {"event_id": "<event_id_string>"}
+
+    Example:
+    {"event_id": "evt_12345"}
+    """
+    if event_id is None or event_id == "":
+        return {
+            "outcome": "refused",
+            "reason": "invalid input: missing fields event_id",
+            "verdict": "refused",
+            "check": "input_validation",
+        }
+    if not isinstance(event_id, str):
+        return {
+            "outcome": "refused",
+            "reason": "invalid input: invalid fields event_id",
+            "verdict": "refused",
+            "check": "input_validation",
+        }
+    clean_event_id = event_id.strip()
+    if DANGEROUS_PATTERNS.search(clean_event_id) or not SAFE_ID_PATTERN.match(clean_event_id) or len(clean_event_id) > 128:
+        return {
+            "outcome": "refused",
+            "reason": "invalid input: invalid characters in event_id",
+            "verdict": "refused",
+            "check": "input_validation",
+        }
 
     from app import metrics
 
@@ -173,9 +253,38 @@ async def _resolve_rulebook(currency: str, db: Any = None):
         return unknown_currency_rulebook(curr)
 
 
-async def get_active_rules(currency: str = "USD", db: Any = None) -> dict[str, Any]:
-    """Retrieve active policy rulebook parameters for currency, sanitized."""
-    clean_curr = validate_safe_string(currency, field_name="currency", max_len=3).upper()
+async def get_active_rules(currency: str | Any = "USD", db: Any = None) -> dict[str, Any]:
+    """Retrieve active policy rulebook parameters for currency, sanitized.
+
+    Input shape:
+    {"currency": "USD"}
+
+    Example:
+    {"currency": "USD"}
+    """
+    if currency is None or currency == "":
+        return {
+            "outcome": "refused",
+            "reason": "invalid input: missing fields currency",
+            "verdict": "refused",
+            "check": "input_validation",
+        }
+    if not isinstance(currency, str):
+        return {
+            "outcome": "refused",
+            "reason": "invalid input: invalid fields currency",
+            "verdict": "refused",
+            "check": "input_validation",
+        }
+    clean_curr = currency.strip()
+    if len(clean_curr) > 3 or DANGEROUS_PATTERNS.search(clean_curr) or not SAFE_ID_PATTERN.match(clean_curr):
+        return {
+            "outcome": "refused",
+            "reason": "invalid input: invalid fields currency",
+            "verdict": "refused",
+            "check": "input_validation",
+        }
+    clean_curr = clean_curr.upper()
     rulebook = await _resolve_rulebook(clean_curr, db=db)
 
     rule_dict = {
@@ -194,7 +303,7 @@ async def get_active_rules(currency: str = "USD", db: Any = None) -> dict[str, A
 
 
 async def propose_recovery(
-    event: RevenueEvent | dict[str, Any],
+    event: RevenueEvent | dict[str, Any] | Any = None,
     context: PolicyContext | dict[str, Any] | None = None,
     db: Any = None,
 ) -> dict[str, Any]:
@@ -202,11 +311,103 @@ async def propose_recovery(
 
     Writes ZERO records to events, executions, verdicts, ledger, or metrics.
     Returns: verdict, reason, the six checks, fingerprint.
+
+    Input shape:
+    {
+      "event": {
+        "event_id": "<string>",
+        "surface": "payment|subscription|checkout|receivable",
+        "amount": <number>,
+        "customer_ref": "<string>",
+        "currency": "<optional_iso_code>",
+        "raw_failure_reason": "<optional_string>",
+        "gateway": "<optional_razorpay_or_paypal>"
+      },
+      "context": {
+        "customer_ref": "<optional_string>",
+        "customer_opted_out": <optional_bool>,
+        "prior_authorized_contacts": <optional_int>,
+        "has_vault_token": <optional_bool>,
+        "processor_response_code": "<optional_string>"
+      }
+    }
+
+    Example:
+    {
+      "event": {
+        "event_id": "evt_rec_001",
+        "surface": "subscription",
+        "amount": 49.0,
+        "currency": "USD",
+        "customer_ref": "cust_123"
+      }
+    }
     """
+    if event is None or (not isinstance(event, (dict, RevenueEvent))):
+        return {
+            "outcome": "refused",
+            "reason": "invalid input: missing fields event",
+            "verdict": "refused",
+            "check": "input_validation",
+        }
+
     if isinstance(event, dict):
-        event_obj = RevenueEvent.model_validate(event)
+        try:
+            event_obj = RevenueEvent.model_validate(event)
+        except ValidationError as exc:
+            return {
+                "outcome": "refused",
+                "reason": format_pydantic_error(exc),
+                "verdict": "refused",
+                "check": "input_validation",
+            }
+        except Exception:
+            return {
+                "outcome": "refused",
+                "reason": "invalid input: invalid fields event",
+                "verdict": "refused",
+                "check": "input_validation",
+            }
     else:
         event_obj = event
+
+    # Validate context if provided
+    if context is not None:
+        if not isinstance(context, (dict, PolicyContext)):
+            return {
+                "outcome": "refused",
+                "reason": "invalid input: invalid fields context",
+                "verdict": "refused",
+                "check": "input_validation",
+            }
+        if isinstance(context, dict):
+            try:
+                pol_context = PolicyContext(**context)
+            except ValidationError as exc:
+                return {
+                    "outcome": "refused",
+                    "reason": format_pydantic_error(exc),
+                    "verdict": "refused",
+                    "check": "input_validation",
+                }
+            except Exception:
+                return {
+                    "outcome": "refused",
+                    "reason": "invalid input: invalid fields context",
+                    "verdict": "refused",
+                    "check": "input_validation",
+                }
+        else:
+            pol_context = context
+    else:
+        pol_context = PolicyContext(
+            customer_ref=event_obj.customer_ref,
+            customer_opted_out=False,
+            prior_authorized_contacts=0,
+            last_authorized_contact_at=None,
+            has_vault_token=True,
+            now=_utc_now(),
+        )
 
     # 1. Pure diagnosis rules
     match = classify(event_obj)
@@ -238,22 +439,7 @@ async def propose_recovery(
     # 3. Active rulebook
     rulebook = await _resolve_rulebook(event_obj.currency, db=db)
 
-    # 4. Policy context
-    if context is None:
-        pol_context = PolicyContext(
-            customer_ref=event_obj.customer_ref,
-            customer_opted_out=False,
-            prior_authorized_contacts=0,
-            last_authorized_contact_at=None,
-            has_vault_token=True,
-            now=_utc_now(),
-        )
-    elif isinstance(context, dict):
-        pol_context = PolicyContext(**context)
-    else:
-        pol_context = context
-
-    # 5. Pure policy evaluate
+    # 4. Pure policy evaluate
     verdict: PolicyVerdict = evaluate_policy(
         decision=dec_rec,
         context=pol_context,
@@ -271,7 +457,7 @@ async def propose_recovery(
 
 
 async def propose_contact(
-    event: RevenueEvent | dict[str, Any],
+    event: RevenueEvent | dict[str, Any] | Any = None,
     context: PolicyContext | dict[str, Any] | None = None,
     intervention: str | None = None,
     db: Any = None,
@@ -280,11 +466,110 @@ async def propose_contact(
 
     Writes ZERO records to events, executions, verdicts, ledger, or metrics.
     Returns: verdict, reason, the six checks, fingerprint.
+
+    Input shape:
+    {
+      "event": {
+        "event_id": "<string>",
+        "surface": "payment|subscription|checkout|receivable",
+        "amount": <number>,
+        "customer_ref": "<string>",
+        "currency": "<optional_iso_code>"
+      },
+      "context": {
+        "customer_ref": "<optional_string>",
+        "customer_opted_out": <optional_bool>,
+        "prior_authorized_contacts": <optional_int>
+      },
+      "intervention": "<optional_contact_intervention_name>"
+    }
+
+    Example:
+    {
+      "event": {
+        "event_id": "evt_con_001",
+        "surface": "subscription",
+        "amount": 49.0,
+        "currency": "USD",
+        "customer_ref": "cust_123"
+      },
+      "intervention": "payment_method_update_link"
+    }
     """
+    if event is None or (not isinstance(event, (dict, RevenueEvent))):
+        return {
+            "outcome": "refused",
+            "reason": "invalid input: missing fields event",
+            "verdict": "refused",
+            "check": "input_validation",
+        }
+
     if isinstance(event, dict):
-        event_obj = RevenueEvent.model_validate(event)
+        try:
+            event_obj = RevenueEvent.model_validate(event)
+        except ValidationError as exc:
+            return {
+                "outcome": "refused",
+                "reason": format_pydantic_error(exc),
+                "verdict": "refused",
+                "check": "input_validation",
+            }
+        except Exception:
+            return {
+                "outcome": "refused",
+                "reason": "invalid input: invalid fields event",
+                "verdict": "refused",
+                "check": "input_validation",
+            }
     else:
         event_obj = event
+
+    if context is not None:
+        if not isinstance(context, (dict, PolicyContext)):
+            return {
+                "outcome": "refused",
+                "reason": "invalid input: invalid fields context",
+                "verdict": "refused",
+                "check": "input_validation",
+            }
+        if isinstance(context, dict):
+            try:
+                pol_context = PolicyContext(**context)
+            except ValidationError as exc:
+                return {
+                    "outcome": "refused",
+                    "reason": format_pydantic_error(exc),
+                    "verdict": "refused",
+                    "check": "input_validation",
+                }
+            except Exception:
+                return {
+                    "outcome": "refused",
+                    "reason": "invalid input: invalid fields context",
+                    "verdict": "refused",
+                    "check": "input_validation",
+                }
+        else:
+            pol_context = context
+    else:
+        pol_context = PolicyContext(
+            customer_ref=event_obj.customer_ref,
+            customer_opted_out=False,
+            prior_authorized_contacts=0,
+            last_authorized_contact_at=None,
+            has_vault_token=False,
+            now=_utc_now(),
+        )
+
+    allowed_contacts = {"reminder", "escalating_reminder_sequence", "manual_escalation", "payment_method_update_link"}
+    if intervention is not None:
+        if not isinstance(intervention, str) or intervention not in allowed_contacts:
+            return {
+                "outcome": "refused",
+                "reason": "invalid input: invalid fields intervention",
+                "verdict": "refused",
+                "check": "input_validation",
+            }
 
     # 1. Pure diagnosis rules
     match = classify(event_obj)
@@ -307,9 +592,6 @@ async def propose_contact(
 
     # 2. Chosen contact intervention (must be an executable contact intervention)
     chosen_intervention = intervention or "payment_method_update_link"
-    allowed_contacts = {"reminder", "escalating_reminder_sequence", "manual_escalation", "payment_method_update_link"}
-    if chosen_intervention not in allowed_contacts:
-        chosen_intervention = "payment_method_update_link"
 
     cost = cost_of(chosen_intervention, currency=event_obj.currency.upper())
     erv = expected_recovery_value(event_obj.amount, 0.70, cost)
@@ -333,22 +615,7 @@ async def propose_contact(
     # 3. Active rulebook
     rulebook = await _resolve_rulebook(event_obj.currency, db=db)
 
-    # 4. Policy context
-    if context is None:
-        pol_context = PolicyContext(
-            customer_ref=event_obj.customer_ref,
-            customer_opted_out=False,
-            prior_authorized_contacts=0,
-            last_authorized_contact_at=None,
-            has_vault_token=False,
-            now=_utc_now(),
-        )
-    elif isinstance(context, dict):
-        pol_context = PolicyContext(**context)
-    else:
-        pol_context = context
-
-    # 5. Pure policy evaluate
+    # 4. Pure policy evaluate
     verdict: PolicyVerdict = evaluate_policy(
         decision=dec_rec,
         context=pol_context,
@@ -366,29 +633,112 @@ async def propose_contact(
 
 
 async def execute_recovery(
-    verdict: AuthorizedVerdict | dict[str, Any],
+    verdict: AuthorizedVerdict | dict[str, Any] | Any = None,
     event_id: str | None = None,
     db: Any = None,
 ) -> dict[str, Any]:
-    """Execute recovery: requires AuthorizedVerdict, sandbox only, refuses attack-range, 1 per 10 mins."""
+    """Execute recovery: requires AuthorizedVerdict, sandbox only, refuses attack-range, 1 per 10 mins.
+
+    Input shape:
+    {
+      "verdict": {
+        "event_id": "<string>",
+        "decision_id": "<24_hex_id>",
+        "decision_version": <int>,
+        "verdict": "authorized",
+        "reason": "ok",
+        "checks_performed": ["<check_name: PASS (ok)>"],
+        "rulebook_fingerprint": "<string>"
+      },
+      "event_id": "<optional_string>"
+    }
+
+    Example:
+    {
+      "verdict": {
+        "event_id": "evt_safe_001",
+        "decision_id": "64b1f2000000000000000001",
+        "decision_version": 1,
+        "verdict": "authorized",
+        "reason": "ok",
+        "checks_performed": ["amount_tier: PASS (ok)"],
+        "rulebook_fingerprint": "rb1_8221b1b9069ffc80"
+      }
+    }
+    """
+    if verdict is None:
+        return {
+            "outcome": "refused",
+            "reason": "invalid input: missing fields verdict",
+            "verdict": "refused",
+            "check": "input_validation",
+        }
+
+    if not isinstance(verdict, (dict, AuthorizedVerdict)):
+        return {
+            "outcome": "refused",
+            "reason": "invalid input: invalid fields verdict",
+            "verdict": "refused",
+            "check": "input_validation",
+        }
+
     # 1. Structural path verification
     try:
         if isinstance(verdict, dict):
+            # Check for required fields before narrowing
+            required_fields = ("event_id", "decision_id", "verdict", "reason")
+            missing_fields = [f for f in required_fields if f not in verdict or verdict[f] is None]
+            if missing_fields:
+                return {
+                    "outcome": "refused",
+                    "reason": f"invalid input: missing fields {', '.join(missing_fields)}",
+                    "verdict": "refused",
+                    "check": "input_validation",
+                }
             auth_verdict = require_authorized(verdict)
         elif isinstance(verdict, AuthorizedVerdict):
             auth_verdict = verdict
         else:
             auth_verdict = require_authorized(verdict.model_dump())
-    except Exception as exc:
+    except ValidationError as exc:
+        return {
+            "outcome": "refused",
+            "reason": format_pydantic_error(exc),
+            "verdict": "refused",
+            "check": "input_validation",
+        }
+    except NotAuthorized:
         return {
             "outcome": "refused",
             "reason": "not_authorized",
-            "detail": f"Structural path refusal: verdict is not authorized: {exc}",
-            "verdict": getattr(verdict, "verdict", "unauthorized") if hasattr(verdict, "verdict") else "unauthorized",
+            "detail": "Structural path refusal: verdict is not authorized.",
+            "verdict": str(getattr(verdict, "verdict", "unauthorized") if hasattr(verdict, "verdict") else verdict.get("verdict", "unauthorized")),
             "check": "structural_authorization",
+        }
+    except Exception:
+        return {
+            "outcome": "refused",
+            "reason": "invalid input: malformed payload",
+            "verdict": "refused",
+            "check": "input_validation",
         }
 
     target_event_id = event_id or auth_verdict.event_id
+    if not isinstance(target_event_id, str):
+        return {
+            "outcome": "refused",
+            "reason": "invalid input: invalid fields event_id",
+            "verdict": "refused",
+            "check": "input_validation",
+        }
+    clean_target_id = target_event_id.strip()
+    if DANGEROUS_PATTERNS.search(clean_target_id) or not SAFE_ID_PATTERN.match(clean_target_id) or len(clean_target_id) > 128:
+        return {
+            "outcome": "refused",
+            "reason": "invalid input: invalid characters in event_id",
+            "verdict": "refused",
+            "check": "input_validation",
+        }
 
     # 2. Sandbox only check
     settings = get_settings()
@@ -402,11 +752,11 @@ async def execute_recovery(
         }
 
     # 3. Attack-range scenarios refusal
-    if is_attack_range_identifier(target_event_id):
+    if is_attack_range_identifier(clean_target_id):
         return {
             "outcome": "refused",
             "reason": "attack_range_scenario_refused",
-            "detail": f"Execution refused: event {target_event_id!r} is within the adversarial attack range.",
+            "detail": f"Execution refused: event {clean_target_id!r} is within the adversarial attack range.",
             "verdict": "refused",
             "check": "attack_range_guard",
         }
@@ -416,13 +766,13 @@ async def execute_recovery(
     ten_minutes_ago = now - timedelta(seconds=EXECUTION_COOLDOWN_SECONDS)
 
     # Check in-memory timestamps
-    if target_event_id in _EVENT_EXECUTION_TIMESTAMPS:
-        last_exec = _EVENT_EXECUTION_TIMESTAMPS[target_event_id]
+    if clean_target_id in _EVENT_EXECUTION_TIMESTAMPS:
+        last_exec = _EVENT_EXECUTION_TIMESTAMPS[clean_target_id]
         if last_exec >= ten_minutes_ago:
             return {
                 "outcome": "refused",
                 "reason": "rate_limited_per_event",
-                "detail": f"Execution refused: event {target_event_id!r} was executed within the last 10 minutes.",
+                "detail": f"Execution refused: event {clean_target_id!r} was executed within the last 10 minutes.",
                 "verdict": "refused",
                 "check": "execution_cooldown_10m",
             }
@@ -438,26 +788,26 @@ async def execute_recovery(
     if database is not None:
         try:
             recent = await database["executions"].find_one({
-                "event_id": target_event_id,
+                "event_id": clean_target_id,
                 "executed_at": {"$gte": ten_minutes_ago},
             })
             if recent:
                 return {
                     "outcome": "refused",
                     "reason": "rate_limited_per_event",
-                    "detail": f"Execution refused: event {target_event_id!r} was executed within the last 10 minutes.",
+                    "detail": f"Execution refused: event {clean_target_id!r} was executed within the last 10 minutes.",
                     "verdict": "refused",
                     "check": "execution_cooldown_10m",
                 }
         except Exception as exc:
-            logger.warning("Error checking prior executions for %s: %s", target_event_id, exc)
+            logger.warning("Error checking prior executions for %s: %s", clean_target_id, exc)
 
     # 5. Invoke real execution service
     from app.execution.service import execute
 
     try:
         outcome = await execute(auth_verdict)
-        _EVENT_EXECUTION_TIMESTAMPS[target_event_id] = now
+        _EVENT_EXECUTION_TIMESTAMPS[clean_target_id] = now
         return {
             "outcome": "allowed",
             "reason": "ok",
@@ -475,14 +825,88 @@ async def execute_recovery(
         }
 
 
+async def list_attack_scenarios(db: Any = None) -> dict[str, Any]:
+    """List all 7 in-memory attack and control scenarios from the gateway catalogue.
+
+    Dry-run only: writes zero records to events, executions, verdicts, ledger, or metrics.
+    Writes only agent_audit rows when dispatched through gateway.
+
+    Input shape:
+    {}
+
+    Example:
+    {}
+    """
+    from app.gateway.catalogue import list_scenarios
+    scenarios = list_scenarios()
+    return {
+        "outcome": "allowed",
+        "reason": "ok",
+        "verdict": "authorized",
+        "scenarios": [sanitize_agent_output(s) for s in scenarios],
+    }
+
+
+async def run_attack_scenario(
+    scenario_id: Any = None,
+    client_key_hash: str = "local",
+    db: Any = None,
+) -> dict[str, Any]:
+    """Execute a catalogue attack scenario in-memory through real pure functions.
+
+    Dry-run only: writes zero records to events, executions, verdicts, ledger, or metrics.
+    Writes only an agent_audit row when dispatched through gateway.
+
+    Input shape:
+    {"scenario_id": "<scenario_id_string>"}
+
+    Example:
+    {"scenario_id": "retry_on_9500"}
+    """
+    from app.gateway.catalogue import ATTACK_SCENARIOS, run_scenario
+
+    if scenario_id is None or scenario_id == "":
+        return {
+            "outcome": "refused",
+            "reason": "invalid input: missing fields scenario_id",
+            "verdict": "refused",
+            "check": "input_validation",
+        }
+    if not isinstance(scenario_id, str):
+        return {
+            "outcome": "refused",
+            "reason": "invalid input: invalid fields scenario_id",
+            "verdict": "refused",
+            "check": "input_validation",
+        }
+    clean_id = scenario_id.strip()
+    if DANGEROUS_PATTERNS.search(clean_id) or not SAFE_ID_PATTERN.match(clean_id):
+        return {
+            "outcome": "refused",
+            "reason": "invalid input: invalid characters in scenario_id",
+            "verdict": "refused",
+            "check": "input_validation",
+        }
+    if clean_id not in ATTACK_SCENARIOS:
+        return {
+            "outcome": "refused",
+            "reason": f"invalid input: unknown scenario_id '{clean_id}'",
+            "verdict": "refused",
+            "check": "input_validation",
+        }
+    return await run_scenario(clean_id, client_key_hash=client_key_hash, record_audit_log=False, db=db)
+
+
 async def dispatch_tool(
     tool_name: str,
-    args: dict[str, Any],
+    args: dict[str, Any] | Any,
     client_key_hash: str = "local",
     agent_id: str = "gateway_agent",
     db: Any = None,
 ) -> dict[str, Any]:
     """Dispatch tool call through registry. Unknown tools are refused with 'not offered' and audited."""
+    call_args = args if isinstance(args, dict) else {}
+
     # Check registry of allowed tool names
     if tool_name not in ALLOWED_TOOLS:
         refusal = {
@@ -495,8 +919,8 @@ async def dispatch_tool(
         await record_audit(
             agent_id=agent_id,
             tool=tool_name,
-            event_or_scenario=str(args.get("scenario_id") or args.get("event_id") or "none"),
-            args=args,
+            event_or_scenario=str(call_args.get("scenario_id") or call_args.get("event_id") or "none"),
+            args=call_args,
             outcome="refused",
             reason="not offered",
             check="tool_registry",
@@ -509,87 +933,118 @@ async def dispatch_tool(
     # Dispatch known tools
     try:
         if tool_name == "list_at_risk_events":
-            limit = int(args.get("limit", 50))
-            data = await list_at_risk_events(limit=limit, db=db)
-            res = {"outcome": "allowed", "reason": "ok", "verdict": "authorized", "events": data}
+            raw_limit = call_args.get("limit", 50)
+            data = await list_at_risk_events(limit=raw_limit, db=db)
+            if isinstance(data, dict) and data.get("outcome") == "refused":
+                res = data
+            else:
+                res = {"outcome": "allowed", "reason": "ok", "verdict": "authorized", "events": data}
 
         elif tool_name == "get_event_audit":
-            event_id = str(args["event_id"])
-            data = await get_event_audit(event_id=event_id, db=db)
-            res = {"outcome": "allowed", "reason": "ok", "verdict": "authorized", "audit_trail": data}
+            raw_event_id = call_args.get("event_id")
+            data = await get_event_audit(event_id=raw_event_id, db=db)
+            if isinstance(data, dict) and data.get("outcome") == "refused":
+                res = data
+            else:
+                res = {"outcome": "allowed", "reason": "ok", "verdict": "authorized", "audit_trail": data}
 
         elif tool_name == "get_active_rules":
-            curr = str(args.get("currency", "USD"))
-            data = await get_active_rules(currency=curr, db=db)
-            res = {"outcome": "allowed", "reason": "ok", "verdict": "authorized", "rules": data}
+            raw_curr = call_args.get("currency", "USD")
+            data = await get_active_rules(currency=raw_curr, db=db)
+            if isinstance(data, dict) and data.get("outcome") == "refused":
+                res = data
+            else:
+                res = {"outcome": "allowed", "reason": "ok", "verdict": "authorized", "rules": data}
 
         elif tool_name == "propose_recovery":
             res = await propose_recovery(
-                event=args["event"],
-                context=args.get("context"),
+                event=call_args.get("event"),
+                context=call_args.get("context"),
                 db=db,
             )
-            # Map verdict to outcome
-            v = res.get("verdict")
-            outcome = "allowed" if v == "authorized" else ("manual_review" if v == "requires_manual_review" else "blocked")
-            res["outcome"] = outcome
+            if res.get("outcome") != "refused":
+                v = res.get("verdict")
+                res["outcome"] = "allowed" if v == "authorized" else ("manual_review" if v == "requires_manual_review" else "blocked")
 
         elif tool_name == "propose_contact":
             res = await propose_contact(
-                event=args["event"],
-                context=args.get("context"),
-                intervention=args.get("intervention"),
+                event=call_args.get("event"),
+                context=call_args.get("context"),
+                intervention=call_args.get("intervention"),
                 db=db,
             )
-            v = res.get("verdict")
-            outcome = "allowed" if v == "authorized" else ("manual_review" if v == "requires_manual_review" else "blocked")
-            res["outcome"] = outcome
+            if res.get("outcome") != "refused":
+                v = res.get("verdict")
+                res["outcome"] = "allowed" if v == "authorized" else ("manual_review" if v == "requires_manual_review" else "blocked")
 
         elif tool_name == "execute_recovery":
             res = await execute_recovery(
-                verdict=args["verdict"],
-                event_id=args.get("event_id"),
+                verdict=call_args.get("verdict"),
+                event_id=call_args.get("event_id"),
+                db=db,
+            )
+
+        elif tool_name == "list_attack_scenarios":
+            res = await list_attack_scenarios(db=db)
+
+        elif tool_name == "run_attack_scenario":
+            res = await run_attack_scenario(
+                scenario_id=call_args.get("scenario_id"),
+                client_key_hash=client_key_hash,
                 db=db,
             )
 
         else:
             res = {"outcome": "refused", "reason": "not offered", "verdict": "refused"}
 
-        # Audit allowed or rejected outcome
-        await record_audit(
-            agent_id=agent_id,
-            tool=tool_name,
-            event_or_scenario=str(args.get("scenario_id") or args.get("event_id") or "operational"),
-            args=args,
-            outcome=res.get("outcome", "allowed"),
-            reason=res.get("reason", "ok"),
-            check=res.get("check"),
-            verdict=res.get("verdict"),
-            rulebook_fingerprint=res.get("rulebook_fingerprint"),
-            client_key_hash=client_key_hash,
-            db=db,
-        )
-        return res
-
-    except Exception as exc:
-        err_res = {
-            "outcome": "error",
-            "reason": str(exc),
-            "verdict": "error",
-            "detail": f"Tool execution failed: {exc}",
+    except ValidationError as exc:
+        res = {
+            "outcome": "refused",
+            "reason": format_pydantic_error(exc),
+            "verdict": "refused",
+            "check": "input_validation",
         }
-        await record_audit(
-            agent_id=agent_id,
-            tool=tool_name,
-            event_or_scenario=str(args.get("scenario_id") or args.get("event_id") or "error"),
-            args=args,
-            outcome="error",
-            reason=str(exc),
-            verdict="error",
-            client_key_hash=client_key_hash,
-            db=db,
-        )
-        return err_res
+    except ValueError as exc:
+        clean_msg = str(exc)
+        if "http" in clean_msg or "class " in clean_msg or len(clean_msg) > 80:
+            clean_msg = "malformed payload"
+        res = {
+            "outcome": "refused",
+            "reason": f"invalid input: {clean_msg}",
+            "verdict": "refused",
+            "check": "input_validation",
+        }
+    except Exception:
+        res = {
+            "outcome": "refused",
+            "reason": "invalid input: malformed payload",
+            "verdict": "refused",
+            "check": "input_validation",
+        }
+
+    # Extract target identifier for audit log
+    event_or_scenario = str(
+        call_args.get("scenario_id")
+        or call_args.get("event_id")
+        or (call_args.get("event", {}).get("event_id") if isinstance(call_args.get("event"), dict) else None)
+        or (res.get("scenario_id") if isinstance(res, dict) else None)
+        or "operational"
+    )
+
+    await record_audit(
+        agent_id=agent_id,
+        tool=tool_name,
+        event_or_scenario=event_or_scenario,
+        args=call_args,
+        outcome=res.get("outcome", "allowed"),
+        reason=res.get("reason", "ok"),
+        check=res.get("check"),
+        verdict=res.get("verdict"),
+        rulebook_fingerprint=res.get("rulebook_fingerprint"),
+        client_key_hash=client_key_hash,
+        db=db,
+    )
+    return res
 
 
 def clear_execution_cooldowns() -> None:

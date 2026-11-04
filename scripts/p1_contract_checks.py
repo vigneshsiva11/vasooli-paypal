@@ -5478,11 +5478,11 @@ def test_step15_mcp_server() -> None:
         async with Client(server) as client:
             tools_resp = await client.list_tools()
             tool_names = set(t.name for t in tools_resp.tools)
-            list_ok = tool_names == ALLOWED_TOOLS
+            list_ok = (tool_names == ALLOWED_TOOLS) and len(ALLOWED_TOOLS) == 8
             report(
-                "15.2 In-memory MCP Client tool list equals ALLOWED_TOOLS allowlist exactly",
+                "15.2 In-memory MCP Client tool list equals ALLOWED_TOOLS allowlist exactly (8 tools)",
                 list_ok,
-                f"tools={tool_names}",
+                f"tools={tool_names}, count={len(tool_names)}",
             )
 
             # 15.3 Tool list contains none of forbidden admin/pipeline/PayPal tools
@@ -5580,19 +5580,98 @@ def test_step15_mcp_server() -> None:
                 and exec_atk_data.get("reason") == "attack_range_scenario_refused"
             )
 
-            # Verify auditing of all calls
-            recent_audit = await get_recent_audit_records(limit=20)
+            # Tool: list_attack_scenarios (new tool 1)
+            res_list_atk = await client.call_tool("list_attack_scenarios", {})
+            list_atk_data = json.loads(res_list_atk.content[0].text)
+            list_atk_ok = (
+                list_atk_data.get("outcome") == "allowed"
+                and list_atk_data.get("verdict") == "authorized"
+                and len(list_atk_data.get("scenarios", [])) == 7
+            )
+
+            # Tool: run_attack_scenario (new tool 2)
+            res_run_atk = await client.call_tool("run_attack_scenario", {"scenario_id": "retry_on_9500"})
+            run_atk_data = json.loads(res_run_atk.content[0].text)
+            run_atk_ok = (
+                run_atk_data.get("outcome") == "blocked"
+                and run_atk_data.get("verdict") == "blocked"
+                and run_atk_data.get("reason") == "retry_not_advised"
+            )
+
+            # Malformed calls tests (Input errors: refused + clean text + audited)
+            # 1. run_attack_scenario missing scenario_id
+            res_mal_run = await client.call_tool("run_attack_scenario", {})
+            mal_run_data = json.loads(res_mal_run.content[0].text)
+            mal_run_ok = (
+                mal_run_data.get("outcome") == "refused"
+                and mal_run_data.get("reason") == "invalid input: missing fields scenario_id"
+                and mal_run_data.get("verdict") == "refused"
+            )
+
+            # 2. propose_recovery with empty event
+            res_mal_rec = await client.call_tool("propose_recovery", {"event": {}})
+            mal_rec_data = json.loads(res_mal_rec.content[0].text)
+            mal_rec_ok = (
+                mal_rec_data.get("outcome") == "refused"
+                and mal_rec_data.get("reason") == "invalid input: missing fields event_id, surface, amount, customer_ref"
+                and mal_rec_data.get("verdict") == "refused"
+            )
+
+            # 3. execute_recovery with empty verdict
+            res_mal_exec = await client.call_tool("execute_recovery", {"verdict": {}})
+            mal_exec_data = json.loads(res_mal_exec.content[0].text)
+            mal_exec_ok = (
+                mal_exec_data.get("outcome") == "refused"
+                and "invalid input: missing fields" in mal_exec_data.get("reason", "")
+                and mal_exec_data.get("verdict") == "refused"
+            )
+
+            # 4. Check that NO raw validation text (Pydantic, URLs, class names) appears in any response
+            all_responses = [
+                res_rules.content[0].text,
+                res_recovery.content[0].text,
+                res_exec_atk.content[0].text,
+                res_list_atk.content[0].text,
+                res_run_atk.content[0].text,
+                res_mal_run.content[0].text,
+                res_mal_rec.content[0].text,
+                res_mal_exec.content[0].text,
+            ]
+            forbidden_raw_tokens = (
+                "pydantic",
+                "errors.pydantic.dev",
+                "input_value",
+                "input_type",
+                "revenueevent",
+                "authorizedverdict",
+                "policyverdictrecord",
+            )
+            no_raw_text = not any(
+                any(tok in resp_text.lower() for tok in forbidden_raw_tokens)
+                for resp_text in all_responses
+            )
+
+            # Verify auditing of all calls (allowed, blocked, refused, malformed)
+            recent_audit = await get_recent_audit_records(limit=30)
             mcp_audit_tools = [r.get("tool") for r in recent_audit if r.get("agent_id") == "mcp_gateway"]
             audited_ok = (
                 "get_active_rules" in mcp_audit_tools
                 and "propose_recovery" in mcp_audit_tools
                 and "execute_recovery" in mcp_audit_tools
+                and "list_attack_scenarios" in mcp_audit_tools
+                and "run_attack_scenario" in mcp_audit_tools
             )
 
             report(
                 "15.4 In-memory tool calls return gateway verdict and are recorded in audit",
                 rules_verdict_ok and recovery_verdict_ok and exec_refused_ok and audited_ok,
                 f"rules_ok={rules_verdict_ok}, recovery_ok={recovery_verdict_ok}, exec_atk_ok={exec_refused_ok}, audited={audited_ok}",
+            )
+
+            report(
+                "15.7 New tools (list/run attack scenarios), malformed input returns refused, and zero raw validation text leaks",
+                list_atk_ok and run_atk_ok and mal_run_ok and mal_rec_ok and mal_exec_ok and no_raw_text,
+                f"list_atk={list_atk_ok}, run_atk={run_atk_ok}, mal_run={mal_run_ok}, mal_rec={mal_rec_ok}, mal_exec={mal_exec_ok}, no_raw_text={no_raw_text}",
             )
 
         # 15.5 Bearer auth on /mcp (PublicDemoMiddleware)

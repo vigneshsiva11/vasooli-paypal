@@ -1586,6 +1586,35 @@ async def run_integration_check() -> int:
             assert atk_exec_val.get("outcome") == "refused"
             assert atk_exec_val.get("reason") == "attack_range_scenario_refused"
 
+            # Execute tool: list_attack_scenarios (new tool 1)
+            res_list_scen = await inmem_client.call_tool("list_attack_scenarios", {})
+            list_scen_val = json.loads(res_list_scen.content[0].text)
+            assert list_scen_val.get("outcome") == "allowed"
+            assert len(list_scen_val.get("scenarios", [])) == 7
+
+            # Execute tool: run_attack_scenario (new tool 2)
+            res_run_scen = await inmem_client.call_tool("run_attack_scenario", {"scenario_id": "retry_on_9500"})
+            run_scen_val = json.loads(res_run_scen.content[0].text)
+            assert run_scen_val.get("outcome") == "blocked"
+            assert run_scen_val.get("reason") == "retry_not_advised"
+
+            # Malformed calls tests (clean error message, no raw pydantic or URLs)
+            res_mal_scen = await inmem_client.call_tool("run_attack_scenario", {})
+            mal_scen_val = json.loads(res_mal_scen.content[0].text)
+            assert mal_scen_val.get("outcome") == "refused"
+            assert mal_scen_val.get("reason") == "invalid input: missing fields scenario_id"
+
+            res_mal_prop = await inmem_client.call_tool("propose_recovery", {"event": {}})
+            mal_prop_val = json.loads(res_mal_prop.content[0].text)
+            assert mal_prop_val.get("outcome") == "refused"
+            assert mal_prop_val.get("reason") == "invalid input: missing fields event_id, surface, amount, customer_ref"
+
+            # Check that zero raw validation tokens leak in responses
+            for resp in (res_rules, res_rec, res_atk_exec, res_list_scen, res_run_scen, res_mal_scen, res_mal_prop):
+                text_lower = resp.content[0].text.lower()
+                for bad_tok in ("pydantic", "errors.pydantic.dev", "input_value", "input_type", "revenueevent", "authorizedverdict"):
+                    assert bad_tok not in text_lower, f"Leaked raw validation token {bad_tok} in {text_lower}"
+
             # Verify zero writes to business collections
             assert await db.events.count_documents({}) == ev_count_before
             assert await db.executions.count_documents({}) == exec_count_before
@@ -1593,12 +1622,14 @@ async def run_integration_check() -> int:
 
             # Verify audit records written to real MongoDB
             audit_records = await db.agent_audit.find({"agent_id": "mcp_gateway"}).to_list(length=100)
-            assert len(audit_records) >= 3
+            assert len(audit_records) >= 5
             audited_tools = {r["tool"] for r in audit_records}
             assert "get_active_rules" in audited_tools
             assert "propose_recovery" in audited_tools
             assert "execute_recovery" in audited_tools
-        print("  [PASS] MCP Server: tools list strictly equals allowlist, calls return verdicts & audited in real MongoDB with zero business writes")
+            assert "list_attack_scenarios" in audited_tools
+            assert "run_attack_scenario" in audited_tools
+        print("  [PASS] MCP Server: tools list strictly equals allowlist (8 tools), calls return verdicts & audited in real MongoDB with zero business writes")
 
         # 18.2 Bearer Auth & Middleware verification on /mcp
         async def _mock_mcp_endpoint(request):

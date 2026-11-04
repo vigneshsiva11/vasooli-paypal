@@ -33,7 +33,7 @@ async def connect_to_mongo() -> None:
     settings = get_settings()
     client: AsyncIOMotorClient = AsyncIOMotorClient(
         settings.mongodb_uri,
-        serverSelectionTimeoutMS=5_000,
+        serverSelectionTimeoutMS=20_000,
         uuidRepresentation="standard",
         tz_aware=True,
     )
