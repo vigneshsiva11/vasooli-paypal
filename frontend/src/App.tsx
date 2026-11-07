@@ -16,6 +16,8 @@ const LedgerRoute = React.lazy(() => import('./features/ledger/components/Ledger
 const LiveRoute = React.lazy(() => import('./features/live/components/LiveRoute'));
 const RulesRoute = React.lazy(() => import('./features/rules/components/RulesRoute'));
 const AgentRoute = React.lazy(() => import('./features/agent/components/AgentRoute'));
+const StoryRoute = React.lazy(() => import('./features/story/components/StoryRoute'));
+const StudioRoute = React.lazy(() => import('./features/studio/components/StudioRoute'));
 
 // Global query client with retry backoff for transient failures
 const queryClient = new QueryClient({
@@ -46,11 +48,26 @@ function App() {
       <CurrencyProvider>
         <BrowserRouter>
           <Routes>
+            <Route
+              path="/story"
+              element={
+                <React.Suspense
+                  fallback={
+                    <div className="flex min-h-screen w-full items-center justify-center bg-slate-950 text-white">
+                      <div className="h-8 w-8 animate-spin rounded-full border-2 border-cyan-400 border-t-transparent" />
+                    </div>
+                  }
+                >
+                  <StoryRoute />
+                </React.Suspense>
+              }
+            />
             <Route element={<AppShell />}>
               <Route path="/" element={<DashboardRoute />} />
               <Route path="/live" element={<LiveRoute />} />
               <Route path="/rules" element={<RulesRoute />} />
               <Route path="/agent" element={<AgentRoute />} />
+              <Route path="/studio" element={<StudioRoute />} />
               <Route path="/ledger" element={<LedgerRoute />} />
               <Route path="/root-cause" element={<RootCauseRoute />} />
               <Route path="/baseline" element={<BaselineRoute />} />

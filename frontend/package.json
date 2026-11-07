@@ -23,6 +23,8 @@
     "@tanstack/react-query": "^5.102.8",
     "ag-grid-community": "36.2.0",
     "ag-grid-react": "36.2.0",
+    "ag-studio": "3.0.0",
+    "ag-studio-react": "3.0.0",
     "clsx": "^2.1.1",
     "framer-motion": "^13.1.1",
     "lucide-react": "^1.35.0",

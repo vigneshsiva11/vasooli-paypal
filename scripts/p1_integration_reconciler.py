@@ -43,6 +43,11 @@ from app.gateways.paypal.vault import (
     ensure_indexes as ensure_vault_indexes,
     get_active_vault_token,
 )
+from app.gateway.studio_limits import (
+    check_and_record_studio_attempt,
+    ensure_indexes as ensure_studio_limits_indexes,
+    STUDIO_COUNTERS_COLLECTION,
+)
 from app.metrics.aggregate import summarize
 from app.metrics.reader import (
     distinct_recoveries,
@@ -1699,6 +1704,84 @@ async def run_integration_check() -> int:
         assert any(v.get("expireAfterSeconds") == 2592000 for v in audit_idx_after.values())
         print("  [PASS] Agent Gateway: demo reset purges agent_audit and agent_counters and re-ensures TTL indexes")
 
+        # 19.1 Studio AI Rate Limit on real MongoDB (20 calls/hour per client key)
+        await ensure_studio_limits_indexes(db=db)
+        test_client_key = "192.0.2.188"
+        await db[STUDIO_COUNTERS_COLLECTION].delete_many({})
+        for i in range(20):
+            allowed, _, _ = await check_and_record_studio_attempt(
+                client_key=test_client_key,
+                conversation_id=f"thread_client_{i}",
+                db=db,
+            )
+            assert allowed, f"Call {i+1} within client 20/hr limit should be allowed"
+        allowed_21, err_21, retry_21 = await check_and_record_studio_attempt(
+            client_key=test_client_key,
+            conversation_id="thread_client_21",
+            db=db,
+        )
+        assert not allowed_21, "21st call from same client must be rejected with 429"
+        assert "Client rate limit exceeded" in (err_21 or "")
+        assert retry_21 is not None and retry_21 > 0
+        print("  [PASS] Studio AI: per-client rate limit enforced on real MongoDB (20/hr allowed, 21st rejected with Retry-After)")
+
+        # 19.2 Studio AI Per-turn guard on real MongoDB (max 6 calls per conversation id per 10 minutes)
+        await db[STUDIO_COUNTERS_COLLECTION].delete_many({})
+        test_thread = "test_thread_guard_123"
+        for i in range(6):
+            allowed, _, _ = await check_and_record_studio_attempt(
+                client_key=f"192.0.2.{i+10}",
+                conversation_id=test_thread,
+                db=db,
+            )
+            assert allowed, f"Turn call {i+1} within 6/10min limit should be allowed"
+        allowed_7, err_7, retry_7 = await check_and_record_studio_attempt(
+            client_key="192.0.2.99",
+            conversation_id=test_thread,
+            db=db,
+        )
+        assert not allowed_7, "7th call for same conversation id within 10 minutes must be rejected"
+        assert "Conversation turn limit exceeded" in (err_7 or "")
+        assert retry_7 is not None and retry_7 > 0
+        print("  [PASS] Studio AI: per-turn guard enforced on real MongoDB (6/10min allowed, 7th rejected with Retry-After)")
+
+        # 19.3 Studio AI Global hourly (100/hr) and daily (500/day) limits on real MongoDB
+        await db[STUDIO_COUNTERS_COLLECTION].delete_many({})
+        now_ts = datetime.now(timezone.utc)
+        docs_100 = [{"key": "global", "type": "global", "created_at": now_ts} for _ in range(100)]
+        await db[STUDIO_COUNTERS_COLLECTION].insert_many(docs_100)
+        allowed_gh, err_gh, retry_gh = await check_and_record_studio_attempt(
+            client_key="198.51.100.5",
+            conversation_id="thread_gh",
+            db=db,
+        )
+        assert not allowed_gh, "101st global hourly call must be rejected"
+        assert "Global hourly rate limit exceeded" in (err_gh or "")
+        assert retry_gh is not None and retry_gh > 0
+
+        # Global daily limit (500/day)
+        await db[STUDIO_COUNTERS_COLLECTION].delete_many({})
+        docs_500 = [{"key": "global", "type": "global", "created_at": now_ts - timedelta(hours=2)} for _ in range(500)]
+        await db[STUDIO_COUNTERS_COLLECTION].insert_many(docs_500)
+        allowed_gd, err_gd, retry_gd = await check_and_record_studio_attempt(
+            client_key="198.51.100.6",
+            conversation_id="thread_gd",
+            db=db,
+        )
+        assert not allowed_gd, "501st global daily call must be rejected"
+        assert "Global daily rate limit exceeded" in (err_gd or "")
+        assert retry_gd is not None and retry_gd > 0
+        print("  [PASS] Studio AI: global limits enforced on real MongoDB (100/hr and 500/day hard ceilings)")
+
+        # 19.4 Studio AI TTL index on studio_ai_counters verified and demo reset cleans it
+        studio_idx = await db[STUDIO_COUNTERS_COLLECTION].index_information()
+        assert any(v.get("expireAfterSeconds") == 86400 for v in studio_idx.values()), "TTL index on studio_ai_counters must be 86400s"
+        res_reset_studio = await reset_demo_database(db)
+        assert res_reset_studio["status"] == "ok"
+        count_studio_counters = await db[STUDIO_COUNTERS_COLLECTION].count_documents({})
+        assert count_studio_counters == 0, f"studio_ai_counters not cleared: {count_studio_counters}"
+        print("  [PASS] Studio AI: TTL index (86400s) verified on studio_ai_counters and demo reset purges collection")
+
         # Cleanup test documents
         await db.demo_runs.delete_many({})
         await db.demo_counters.delete_many({})
@@ -1706,9 +1789,10 @@ async def run_integration_check() -> int:
         await db.rules_rate_limits.delete_many({})
         await db.agent_audit.delete_many({})
         await db.agent_counters.delete_many({})
+        await db[STUDIO_COUNTERS_COLLECTION].delete_many({})
 
         print("\n" + "=" * 78)
-        print("RESULT: ALL INTEGRATION CHECKS PASSED (31/31)")
+        print("RESULT: ALL INTEGRATION CHECKS PASSED (35/35)")
         print("=" * 78)
         return 0
 

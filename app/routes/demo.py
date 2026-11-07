@@ -207,7 +207,7 @@ async def reset_demo_database(db: Any = None) -> dict[str, Any]:
             await database[col_name].drop()
         except Exception as exc:
             logger.debug("Drop collection %s: %s", col_name, exc)
-    for extra_col in ("demo_counters", "rulebook_versions", "rules_rate_limits", "agent_audit", "agent_counters"):
+    for extra_col in ("demo_counters", "rulebook_versions", "rules_rate_limits", "agent_audit", "agent_counters", "studio_ai_counters"):
         try:
             await database[extra_col].drop()
         except Exception as exc:
@@ -217,11 +217,15 @@ async def reset_demo_database(db: Any = None) -> dict[str, Any]:
     from app.policy.gemini_rules import clear_preview_cache
     from app.gateway.audit import ensure_indexes as ensure_agent_audit_indexes, clear_offline_audit_log
     from app.gateway.limits import ensure_indexes as ensure_agent_limits_indexes, clear_limits
+    from app.gateway.studio_limits import ensure_indexes as ensure_studio_limits_indexes, clear_offline_counters
+    from app.routes.studio_ai import clear_response_cache
     from app.gateway.tools import clear_execution_cooldowns
     invalidate_usd_cache()
     clear_preview_cache()
     clear_offline_audit_log()
     clear_limits()
+    clear_offline_counters()
+    clear_response_cache()
     clear_execution_cooldowns()
 
     # 2. Re-ensure indexes
@@ -239,6 +243,7 @@ async def reset_demo_database(db: Any = None) -> dict[str, Any]:
     await ensure_rulebook_indexes(database)
     await ensure_agent_audit_indexes(database)
     await ensure_agent_limits_indexes(database)
+    await ensure_studio_limits_indexes(database)
     await reset_mongo_clock(database)
 
     return {

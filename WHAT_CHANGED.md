@@ -64,3 +64,6 @@ Baseline: the original Vasooli repository at tag `razorpay-buildathon-submission
 - MCP server at /mcp with a bearer agent token and an allowlisted tool list; every call audited.
 
 - Added the /agent page: seven attack scenarios evaluated by the real policy layer in dry-run, with a live audit feed.
+
+## 2026-11-05/06: Studio
+- Added a lazy-loaded Studio dashboard (AG Studio over the sanitized ledger) and a guarded, rate-limited, switched-off-by-default backend proxy for the assistant.

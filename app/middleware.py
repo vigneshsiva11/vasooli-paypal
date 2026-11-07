@@ -49,6 +49,25 @@ class PublicDemoMiddleware(BaseHTTPMiddleware):
         path = request.url.path.rstrip("/")
         current_settings = self._get_settings()
 
+        # Studio AI assistant endpoint: exact-path entry with CORS for that path only
+        if path == "/ai/studio":
+            if request.method == "OPTIONS":
+                return Response(
+                    status_code=200,
+                    headers={
+                        "Access-Control-Allow-Origin": "*",
+                        "Access-Control-Allow-Methods": "POST, OPTIONS",
+                        "Access-Control-Allow-Headers": "*",
+                        "Access-Control-Expose-Headers": "Retry-After",
+                    },
+                )
+            res = await call_next(request)
+            res.headers.setdefault("Access-Control-Allow-Origin", "*")
+            res.headers.setdefault("Access-Control-Allow-Methods", "POST, OPTIONS")
+            res.headers.setdefault("Access-Control-Allow-Headers", "*")
+            res.headers.setdefault("Access-Control-Expose-Headers", "Retry-After")
+            return res
+
         # MCP server endpoint: exact path with its own bearer auth and 60/min rate limit
         if path == "/mcp" or path.startswith("/mcp/"):
             # OPTIONS requests stay public for CORS preflight
@@ -113,8 +132,8 @@ class PublicDemoMiddleware(BaseHTTPMiddleware):
         if request.method == "POST" and path == "/webhooks/paypal":
             return await call_next(request)
 
-        # Exact-path allowlist for public demo run, rules preview, and agent attempt route
-        if request.method == "POST" and path in ("/demo/public/run", "/rules/preview", "/agent/attempt"):
+        # Exact-path allowlist for public demo run, rules preview, agent attempt route, and studio AI
+        if request.method == "POST" and path in ("/demo/public/run", "/rules/preview", "/agent/attempt", "/ai/studio"):
             return await call_next(request)
 
         # Fail closed if admin_token is empty

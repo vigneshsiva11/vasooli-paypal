@@ -43,6 +43,7 @@ from app.routes import (
     promises,
     rules,
     sim,
+    studio_ai,
     webhooks,
 )
 from app.webhooks import ensure_indexes as ensure_verification_indexes
@@ -94,10 +95,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             from app.policy.rulebook_store import ensure_rulebook_indexes, get_active_usd_rulebook, RULEBOOK_VERSIONS_COLLECTION
             from app.gateway.audit import ensure_indexes as ensure_agent_audit_indexes
             from app.gateway.limits import ensure_indexes as ensure_agent_limits_indexes
+            from app.gateway.studio_limits import ensure_indexes as ensure_studio_indexes
             from app.db import get_database
             await ensure_rulebook_indexes()
             await ensure_agent_audit_indexes()
             await ensure_agent_limits_indexes()
+            await ensure_studio_indexes()
             active_book = await get_active_usd_rulebook()
             db = get_database()
             active_doc = None
@@ -174,6 +177,8 @@ app.include_router(sim.router)
 app.include_router(demo.router)
 # Agent Gateway router
 app.include_router(agent.router)
+# AG Studio AI Proxy router
+app.include_router(studio_ai.router)
 
 # Mount MCP server over Streamable HTTP at /mcp
 mcp_sub_app = get_mcp_app()

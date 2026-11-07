@@ -110,3 +110,26 @@ export const apiClient = async <T>(endpoint: string, options: RequestInit = {}):
   const text = await res.text();
   return text ? JSON.parse(text) : (null as unknown as T);
 };
+
+export const streamApiClient = async (
+  endpoint: string,
+  body: any,
+  options: { signal?: AbortSignal } = {}
+): Promise<Response> => {
+  const { baseUrl, error } = getApiConfig();
+  if (error || !baseUrl) {
+    throw new ApiError(error || 'VITE_API_BASE_URL configuration error', 500);
+  }
+
+  const cleanEndpoint = endpoint.startsWith('/') ? endpoint : `/${endpoint}`;
+  const url = `${baseUrl}${cleanEndpoint}`;
+
+  return fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(body),
+    signal: options.signal,
+  });
+};

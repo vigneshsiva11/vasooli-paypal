@@ -12,6 +12,8 @@ import {
   Menu,
   X,
   Bot,
+  PlayCircle,
+  Sparkles,
 } from 'lucide-react';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
@@ -25,8 +27,10 @@ export function cn(...inputs: ClassValue[]) {
 const NAV_ITEMS = [
   { path: '/', label: 'Overview', icon: LayoutDashboard },
   { path: '/live', label: 'Mission Control', icon: Radio },
+  { path: '/story', label: 'Story Mode', icon: PlayCircle },
   { path: '/rules', label: 'Rules', icon: SlidersHorizontal },
   { path: '/agent', label: 'Try to break it', icon: Bot },
+  { path: '/studio', label: 'Studio', icon: Sparkles },
   { path: '/ledger', label: 'Ledger', icon: BookOpen },
   { path: '/root-cause', label: 'Root Cause', icon: TrendingDown },
   { path: '/baseline', label: 'Baseline', icon: Target },

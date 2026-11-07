@@ -30,7 +30,7 @@ class SecurityAwareEnvSource(EnvSettingsSource):
         vars_dict = dict(super()._load_env_vars())
         for key, val in os.environ.items():
             norm_key = key if self.case_sensitive else key.lower()
-            if norm_key in ("public_demo", "admin_token", "public_runs", "agent_token"):
+            if norm_key in ("public_demo", "admin_token", "public_runs", "agent_token", "studio_ai_enabled"):
                 if val == "" or val is None:
                     vars_dict[norm_key] = ""
         return vars_dict
@@ -58,7 +58,7 @@ class SecurityAwareDotEnvSource(DotEnvSettingsSource):
                 )
                 for k, v in raw.items():
                     norm_key = k if self.case_sensitive else k.lower()
-                    if norm_key in ("public_demo", "admin_token", "public_runs", "agent_token") and v == "":
+                    if norm_key in ("public_demo", "admin_token", "public_runs", "agent_token", "studio_ai_enabled") and v == "":
                         vars_dict[norm_key] = ""
         return vars_dict
 
@@ -94,6 +94,16 @@ class Settings(BaseSettings):
     # Orchestrator
     auto_orchestrate: bool = False
 
+    # AG Studio AI Proxy
+    studio_ai_enabled: bool = False
+    studio_ai_max_body_bytes: int = 32 * 1024  # 32 KB
+    studio_ai_max_output_tokens: int = 1024
+    studio_ai_client_rate_limit: int = 20  # 20/hour per client key
+    studio_ai_global_rate_limit_hour: int = 100  # 100/hour globally
+    studio_ai_global_rate_limit_day: int = 500  # 500/day globally
+    studio_ai_turn_rate_limit: int = 6  # max 6 calls per conversation id per 10 minutes
+    studio_ai_cache_ttl_seconds: int = 300  # 5 minutes
+
     @classmethod
     def settings_customise_sources(
         cls,
@@ -117,7 +127,7 @@ class Settings(BaseSettings):
         )
         return init_settings, custom_env, custom_dotenv, file_secret_settings
 
-    @field_validator("public_demo", "public_runs", mode="before")
+    @field_validator("public_demo", "public_runs", "studio_ai_enabled", mode="before")
     @classmethod
     def _parse_public_demo(cls, v: Any) -> bool:
         if v is None:
@@ -195,6 +205,7 @@ class Settings(BaseSettings):
     # Google Gemini
     gemini_api_key: str = ""
     gemini_model: str = "gemini-3.6-flash"
+    gemini_model_fallback: str = "gemini-3.5-flash-lite"
     gemini_timeout_seconds: float = 20.0
     # The health probe gets its own, much shorter budget: `GET /` must stay fast
     # even when Gemini is hanging, so it cannot inherit the diagnosis timeout.
