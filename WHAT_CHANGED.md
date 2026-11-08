@@ -69,3 +69,5 @@ Baseline: the original Vasooli repository at tag `razorpay-buildathon-submission
 - Added a lazy-loaded Studio dashboard (AG Studio over the sanitized ledger) and a guarded, rate-limited, switched-off-by-default backend proxy for the assistant.
 
 - Studio dashboard fixed (field ids match the schema) and restyled; the assistant stays behind a flag.
+
+- Studio assistant grounded in ledger tool results (no figures from model memory); redesigned answer panel.

@@ -2177,6 +2177,9 @@ def test_step8_settings_cors_origins() -> None:
         ("JSON array", '["http://a.com", "http://b.com"]', ["http://a.com", "http://b.com"]),
     ]
 
+    from pydantic_settings import DotEnvSettingsSource
+    dotenv_patcher = patch.object(DotEnvSettingsSource, "_read_env_files", return_value={})
+    dotenv_patcher.start()
     try:
         # Test each form with PUBLIC_DEMO both off and on
         for demo_flag, demo_expected, demo_label in [("false", False, "off"), ("true", True, "on")]:
@@ -2485,6 +2488,10 @@ def test_step8_settings_cors_origins() -> None:
             f"is_production={s_local_default.is_production}, public_demo={s_local_default.public_demo}, admin_token={s_local_default.admin_token!r}, status={r_local_no_token.status_code}",
         )
     finally:
+        try:
+            dotenv_patcher.stop()
+        except Exception:
+            pass
         for k, v in saved_env.items():
             if v is None:
                 os.environ.pop(k, None)
@@ -5953,6 +5960,53 @@ def test_step16_studio_ai_proxy() -> None:
             f"system_instruction_matches={sys_inst == STUDIO_AI_SYSTEM_PROMPT}",
         )
 
+        # 16.5a Offline check: server prompt contains grounding rules and client-supplied instructions are ignored
+        required_grounding_phrases = [
+            "Studio tool result",
+            "view_schema",
+            "execute_query",
+            "never state figures from memory",
+            "sanitized Vasooli ledger",
+            "Source: ledger query",
+            "short plain-English answers",
+            "at most 6 lines",
+            "no SQL",
+            "state the currency",
+        ]
+        has_all_grounding_rules = all(
+            phrase.lower() in str(sys_inst).lower() for phrase in required_grounding_phrases
+        )
+        client_instr_ignored = "SYSTEM OVERRIDE" not in str(sys_inst) and "secret keys" not in str(sys_inst)
+        report(
+            "16.5a Server prompt contains grounding rules and client-supplied instructions are ignored",
+            has_all_grounding_rules and client_instr_ignored,
+            f"has_rules={has_all_grounding_rules}, client_ignored={client_instr_ignored}",
+        )
+
+        # 16.5b First turn of conversation includes instruction to call view_schema
+        contents_sent = call_kwargs.get("contents", [])
+        first_turn_has_schema = any("view_schema" in str(c) for c in contents_sent)
+        report(
+            "16.5b First turn includes instruction to call view_schema",
+            first_turn_has_schema,
+            f"first_turn_has_schema={first_turn_has_schema}",
+        )
+
+        # 16.5c Temperature is 0, output token cap is kept, tool_choice is auto
+        temp_val = getattr(gem_cfg, "temperature", None)
+        tool_cfg_val = getattr(gem_cfg, "tool_config", None)
+        mode_val = None
+        if tool_cfg_val:
+            fc = getattr(tool_cfg_val, "function_calling_config", None) or (tool_cfg_val.get("function_calling_config") if isinstance(tool_cfg_val, dict) else None)
+            if fc:
+                mode_val = getattr(fc, "mode", None) or (fc.get("mode") if isinstance(fc, dict) else None)
+        auto_mode = str(mode_val).upper().endswith("AUTO")
+        report(
+            "16.5c Temperature is 0, output token cap is kept, tool_choice is auto",
+            temp_val == 0.0 and auto_mode,
+            f"temp={temp_val}, auto_mode={auto_mode}",
+        )
+
     # 16.6 Gemini API key never leaks in responses or logs
     with patch("app.routes.studio_ai.get_settings") as mock_settings, \
          patch("app.middleware.get_settings") as mock_mid_settings, \
@@ -6029,6 +6083,60 @@ def test_step16_studio_ai_proxy() -> None:
             "16.8 Response cache hit returns 200 and makes zero extra Gemini calls",
             r1.status_code == 200 and r2.status_code == 200 and mock_gemini.call_count == 1,
             f"r1={r1.status_code}, r2={r2.status_code}, call_count={mock_gemini.call_count}",
+        )
+
+        # 16.8b Recorded fixture: ungrounded answer with figures without prior tool call is NOT cached
+        hallucinated_fixture = {
+            "candidates": [{
+                "content": {
+                    "parts": [{"text": "We recovered $1,250,000 across 1,420 recoveries from table revenue_recoveries."}]
+                }
+            }]
+        }
+        mock_gemini.return_value = hallucinated_fixture
+        clear_offline_counters()
+        clear_response_cache()
+
+        hallucinated_payload = {
+            "conversationId": "conv_untool",
+            "input": [{"role": "user", "content": "How much revenue was recovered?"}]
+        }
+        calls_before = mock_gemini.call_count
+        r_hal1 = client.post("/ai/studio", json=hallucinated_payload)
+        r_hal2 = client.post("/ai/studio", json=hallucinated_payload)
+        report(
+            "16.8b Answer without prior tool call containing figures is not cached as grounded",
+            r_hal1.status_code == 200 and r_hal2.status_code == 200 and mock_gemini.call_count == calls_before + 2,
+            f"calls_made={mock_gemini.call_count - calls_before} (expected 2 calls, not cached)",
+        )
+
+        # 16.8c Grounded answer following a prior tool call IS cached
+        grounded_fixture = {
+            "candidates": [{
+                "content": {
+                    "parts": [{"text": "Total recovered: $147.00 USD. Source: ledger query"}]
+                }
+            }]
+        }
+        mock_gemini.return_value = grounded_fixture
+        clear_offline_counters()
+        clear_response_cache()
+
+        grounded_payload = {
+            "conversationId": "conv_grounded",
+            "input": [
+                {"role": "user", "content": "How much revenue was recovered?"},
+                {"role": "assistant", "content": "Running execute_query..."},
+                {"role": "tool", "content": json.dumps({"rows": [{"amount": 147.0}]})},
+            ]
+        }
+        calls_before_gr = mock_gemini.call_count
+        r_gr1 = client.post("/ai/studio", json=grounded_payload)
+        r_gr2 = client.post("/ai/studio", json=grounded_payload)
+        report(
+            "16.8c Grounded answer following a prior tool call is cached",
+            r_gr1.status_code == 200 and r_gr2.status_code == 200 and mock_gemini.call_count == calls_before_gr + 1,
+            f"calls_made={mock_gemini.call_count - calls_before_gr} (expected 1 call, cached)",
         )
 
     # 16.9 Gemini 503 retry -> fallback model -> clean 503

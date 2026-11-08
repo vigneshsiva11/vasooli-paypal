@@ -29,22 +29,77 @@ export const PROMPT_STARTERS: AgAiPromptStarter[] = [
   },
 ];
 
+export interface AiErrorInfo {
+  type: 'rate_limit' | 'service_unavailable' | 'network' | 'cancelled';
+  message: string;
+  retryAfterSeconds?: number;
+}
+
+export function parseAiError(
+  status: number | null | undefined,
+  retryAfter?: number | string | null,
+  rawError?: unknown
+): AiErrorInfo {
+  if (status === 429) {
+    const seconds = Math.max(1, Number(retryAfter) || 60);
+    return {
+      type: 'rate_limit',
+      message: `Rate limit reached. Please retry in ${seconds}s.`,
+      retryAfterSeconds: seconds,
+    };
+  }
+  if (status === 503) {
+    return {
+      type: 'service_unavailable',
+      message: 'The assistant is switched off or busy; the dashboard still works',
+    };
+  }
+  if (rawError instanceof Error && rawError.name === 'AbortError') {
+    return {
+      type: 'cancelled',
+      message: 'Request cancelled.',
+    };
+  }
+  return {
+    type: 'network',
+    message: 'Network error: unable to reach the AI assistant. Please check your connection.',
+  };
+}
+
 export function mapAiError(
   status: number | null | undefined,
   retryAfter?: number | string | null,
   rawError?: unknown
 ): string {
-  if (status === 429) {
-    const seconds = Number(retryAfter) || 60;
-    return `Rate limit reached. Please retry in ${seconds}s.`;
-  }
-  if (status === 503) {
-    return 'The assistant is switched off or busy; the dashboard still works';
-  }
-  if (rawError instanceof Error && rawError.name === 'AbortError') {
-    return 'Request cancelled.';
-  }
-  return 'Network error: unable to reach the AI assistant. Please check your connection.';
+  return parseAiError(status, retryAfter, rawError).message;
+}
+
+export interface AssistantChatMessage {
+  id: string;
+  role: 'user' | 'assistant';
+  text: string;
+  errorType?: 'rate_limit' | 'service_unavailable' | 'network' | 'cancelled';
+  retryAfterSeconds?: number;
+}
+
+export interface AssistantChatState {
+  messages: AssistantChatMessage[];
+  prompt: string;
+  isStreaming: boolean;
+  activeError: AiErrorInfo | null;
+}
+
+export function createInitialChatState(): AssistantChatState {
+  return {
+    messages: [],
+    prompt: '',
+    isStreaming: false,
+    activeError: null,
+  };
+}
+
+export function clearChatState(): AssistantChatState {
+  return createInitialChatState();
 }
 
 async function* parseSseStream(response: Response): AsyncGenerator<AgAiEvent> {

@@ -1,10 +1,23 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import * as fs from 'fs';
 import * as path from 'path';
+import React from 'react';
+import { renderToStaticMarkup } from 'react-dom/server';
 import { createDataEngine } from 'ag-studio';
 import { buildStudioDashboardConfig, STUDIO_SOURCE_ID } from '../features/studio/utils/studioConfig';
-import { mapAiError, PROMPT_STARTERS, StudioLlmAdapter } from '../features/studio/api/studioAi';
+import {
+  mapAiError,
+  parseAiError,
+  clearChatState,
+  createInitialChatState,
+  PROMPT_STARTERS,
+  StudioLlmAdapter,
+} from '../features/studio/api/studioAi';
 import { isStudioAiEnabled } from '../features/studio/utils/studioAiCheck';
+import {
+  StudioMarkdownRenderer,
+  stripCodeFences,
+} from '../features/studio/components/StudioMarkdownRenderer';
 import {
   humanizeRootCause,
   getAssertionBadgeInfo,
@@ -261,6 +274,130 @@ describe('AG Studio Assistant & Adapter Error Mapping', () => {
     } finally {
       (import.meta.env as any).VITE_STUDIO_AI = original;
     }
+  });
+
+  it('parses structured error info with parseAiError for 429, 503, and network errors', () => {
+    const rateLimit = parseAiError(429, 45);
+    expect(rateLimit.type).toBe('rate_limit');
+    expect(rateLimit.retryAfterSeconds).toBe(45);
+    expect(rateLimit.message).toBe('Rate limit reached. Please retry in 45s.');
+
+    const serviceUnavailable = parseAiError(503);
+    expect(serviceUnavailable.type).toBe('service_unavailable');
+    expect(serviceUnavailable.message).toBe(
+      'The assistant is switched off or busy; the dashboard still works'
+    );
+
+    const networkError = parseAiError(null, null, new Error('Failed to fetch'));
+    expect(networkError.type).toBe('network');
+    expect(networkError.message).toBe(
+      'Network error: unable to reach the AI assistant. Please check your connection.'
+    );
+
+    const cancelled = parseAiError(null, null, new DOMException('Aborted', 'AbortError'));
+    expect(cancelled.type).toBe('cancelled');
+    expect(cancelled.message).toBe('Request cancelled.');
+  });
+
+  it('handles clear action by resetting assistant state to pristine defaults', () => {
+    const initialState = createInitialChatState();
+    expect(initialState.messages).toEqual([]);
+    expect(initialState.prompt).toBe('');
+    expect(initialState.isStreaming).toBe(false);
+    expect(initialState.activeError).toBeNull();
+
+    // Simulate dirty state with messages, active error, and prompt
+    const dirtyState = {
+      messages: [
+        { id: '1', role: 'user' as const, text: 'Hello' },
+        { id: '2', role: 'assistant' as const, text: 'Hi', errorType: 'rate_limit' as const },
+      ],
+      prompt: 'Next query',
+      isStreaming: true,
+      activeError: { type: 'rate_limit' as const, message: 'Too many requests', retryAfterSeconds: 30 },
+    };
+    expect(dirtyState.messages.length).toBe(2);
+
+    // Calling clearChatState returns clean state
+    const cleared = clearChatState();
+    expect(cleared.messages).toEqual([]);
+    expect(cleared.prompt).toBe('');
+    expect(cleared.isStreaming).toBe(false);
+    expect(cleared.activeError).toBeNull();
+  });
+});
+
+describe('Studio Safe Markdown Renderer', () => {
+  it('renders headings (# to ####) into corresponding HTML heading elements', () => {
+    const md = '# Main Header\n## Sub Header\n### Section Title\n#### Sub Section';
+    const html = renderToStaticMarkup(React.createElement(StudioMarkdownRenderer, { content: md }));
+
+    expect(html).toContain('<h1 class="text-base font-bold text-slate-900 mt-3.5 mb-1">Main Header</h1>');
+    expect(html).toContain('<h2 class="text-sm font-bold text-slate-900 mt-3 mb-1">Sub Header</h2>');
+    expect(html).toContain('<h3 class="text-sm font-semibold text-slate-900 mt-2.5 mb-1">Section Title</h3>');
+    expect(html).toContain('<h4 class="text-xs font-semibold text-slate-900 mt-2 mb-1">Sub Section</h4>');
+  });
+
+  it('renders unordered and ordered lists with correct list items', () => {
+    const mdList = '- Insufficient funds: $12,400\n- Expired card: $8,200\n- Fraud check: $5,100';
+    const htmlUl = renderToStaticMarkup(React.createElement(StudioMarkdownRenderer, { content: mdList }));
+
+    expect(htmlUl).toContain('<ul class="list-disc list-inside space-y-1 my-1.5 text-xs text-slate-700 pl-1">');
+    expect(htmlUl).toContain('<li class="leading-relaxed">Insufficient funds: $12,400</li>');
+    expect(htmlUl).toContain('<li class="leading-relaxed">Expired card: $8,200</li>');
+
+    const mdOrdered = '1. Review high risk events\n2. Trigger re-auth flow\n3. Verify gateway status';
+    const htmlOl = renderToStaticMarkup(React.createElement(StudioMarkdownRenderer, { content: mdOrdered }));
+
+    expect(htmlOl).toContain('<ol class="list-decimal list-inside space-y-1 my-1.5 text-xs text-slate-700 pl-1">');
+    expect(htmlOl).toContain('<li class="leading-relaxed">Review high risk events</li>');
+    expect(htmlOl).toContain('<li class="leading-relaxed">Trigger re-auth flow</li>');
+  });
+
+  it('renders markdown tables inside a dedicated scrollable container', () => {
+    const mdTable = `
+| Root Cause | Amount at Risk | Recovered |
+| --- | --- | --- |
+| Insufficient Funds | $12,500 | $8,200 |
+| Card Verification | $4,300 | $4,300 |
+`;
+    const html = renderToStaticMarkup(React.createElement(StudioMarkdownRenderer, { content: mdTable }));
+
+    expect(html).toContain('class="overflow-x-auto max-w-full my-2.5 rounded-lg border border-slate-200 shadow-xs"');
+    expect(html).toContain('<table class="min-w-full divide-y divide-slate-200 text-left text-[11px]"');
+    expect(html).toContain('<th class="px-3 py-2 whitespace-nowrap">Root Cause</th>');
+    expect(html).toContain('<th class="px-3 py-2 whitespace-nowrap">Amount at Risk</th>');
+    expect(html).toContain('<td class="px-3 py-1.5 text-slate-700">Insufficient Funds</td>');
+    expect(html).toContain('<td class="px-3 py-1.5 text-slate-700">$12,500</td>');
+  });
+
+  it('safely escapes angle brackets without injecting raw HTML or executable scripts', () => {
+    const xssPayload = 'Ledger status: <script>alert("xss")</script> and <img src="x" onerror="alert(1)" />';
+    const html = renderToStaticMarkup(React.createElement(StudioMarkdownRenderer, { content: xssPayload }));
+
+    // Verifies that <script> is converted into harmless text entities &lt;script&gt;
+    expect(html).not.toContain('<script>');
+    expect(html).not.toContain('<img src="x"');
+    expect(html).toContain('&lt;script&gt;alert(&quot;xss&quot;)&lt;/script&gt;');
+    expect(html).toContain('&lt;img src=&quot;x&quot; onerror=&quot;alert(1)&quot; /&gt;');
+  });
+
+  it('strips code fences from view and renders code as inline tags', () => {
+    const rawWithFences = '```json\n{"summary": "recovered"}\n```\nAnalysis completed for `event_102`.';
+    const stripped = stripCodeFences(rawWithFences);
+    expect(stripped).not.toContain('```json');
+    expect(stripped).not.toContain('```');
+
+    const html = renderToStaticMarkup(React.createElement(StudioMarkdownRenderer, { content: rawWithFences }));
+    expect(html).not.toContain('```');
+    expect(html).toContain('<code class="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-[11px] text-slate-800 break-all border border-slate-200/60">event_102</code>');
+  });
+
+  it('renders bold markdown formatting properly', () => {
+    const md = 'Total verified recovered is **$25,400.00** USD.';
+    const html = renderToStaticMarkup(React.createElement(StudioMarkdownRenderer, { content: md }));
+
+    expect(html).toContain('<strong class="font-semibold text-slate-900">$25,400.00</strong>');
   });
 });
 

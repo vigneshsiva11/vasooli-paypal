@@ -83,7 +83,7 @@ const StudioContent: React.FC = () => {
   }
 
   return (
-    <div className="space-y-6 pb-12">
+    <div className="space-y-6 pb-12 w-full max-w-full overflow-x-hidden">
       {/* 1. Page header */}
       <StudioHeader
         currency={currency}
@@ -91,9 +91,9 @@ const StudioContent: React.FC = () => {
         onRefresh={() => refetch()}
       />
 
-      <div className={`flex flex-col ${aiEnabled ? 'xl:flex-row' : ''} gap-6 items-stretch`}>
+      <div className={`flex flex-col ${aiEnabled ? 'lg:flex-row' : ''} gap-6 items-start w-full max-w-full overflow-x-hidden`}>
         {/* Main Dashboard Layout */}
-        <div className="flex-1 min-w-0 space-y-6">
+        <div className="flex-1 min-w-0 w-full space-y-6">
           {/* 2. Row 1: Three equal KPI cards */}
           <StudioKpiCards
             verifiedRecovered={kpiStats.verifiedRecovered}
@@ -103,14 +103,14 @@ const StudioContent: React.FC = () => {
           />
 
           {/* 2 & 3. Row 2: Root-cause chart (~40%) and Grid (~60%) */}
-          <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-stretch">
+          <div className="grid grid-cols-1 xl:grid-cols-12 gap-6 items-stretch">
             {/* Chart: left ~40% (5 of 12 cols = 41.7%) */}
-            <div className="lg:col-span-5 h-full">
+            <div className="xl:col-span-5 h-full min-w-0">
               <StudioRootCauseChart data={rootCauseData} currency={currency} />
             </div>
 
             {/* Grid: right ~60% (7 of 12 cols = 58.3%) */}
-            <div className="lg:col-span-7 h-full">
+            <div className="xl:col-span-7 h-full min-w-0">
               <StudioGrid rows={rows} currency={currency} />
             </div>
           </div>
@@ -119,9 +119,9 @@ const StudioContent: React.FC = () => {
           <StudioFooter />
         </div>
 
-        {/* 4. Assistant panel docked on the right when VITE_STUDIO_AI is true */}
+        {/* 4. Assistant panel docked on the right on >= 1024px, stacked below dashboard on < 1024px */}
         {aiEnabled && (
-          <aside className="w-full xl:w-88 shrink-0">
+          <aside className="w-full lg:w-96 xl:w-[420px] shrink-0 min-w-0">
             <StudioAssistantPanel />
           </aside>
         )}
