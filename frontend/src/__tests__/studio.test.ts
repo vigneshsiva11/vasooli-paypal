@@ -1,9 +1,15 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import * as fs from 'fs';
 import * as path from 'path';
-import { buildStudioDashboardConfig } from '../features/studio/utils/studioConfig';
+import { createDataEngine } from 'ag-studio';
+import { buildStudioDashboardConfig, STUDIO_SOURCE_ID } from '../features/studio/utils/studioConfig';
 import { mapAiError, PROMPT_STARTERS, StudioLlmAdapter } from '../features/studio/api/studioAi';
 import { isStudioAiEnabled } from '../features/studio/utils/studioAiCheck';
+import {
+  humanizeRootCause,
+  getAssertionBadgeInfo,
+  formatShortEventId,
+} from '../features/studio/utils/studioFormatters';
 import type { LedgerRow } from '../features/ledger/api/getLedger';
 import * as clientModule from '../api/client';
 
@@ -50,37 +56,78 @@ describe('AG Studio Dashboard Configuration', () => {
     expect(page.id).toBe('studio-overview');
 
     const widgets = (page.widgets || {}) as Record<string, any>;
+    const prefix = STUDIO_SOURCE_ID;
+
     expect(widgets['kpi-verified-recovered']).toBeDefined();
     expect(widgets['kpi-verified-recovered'].type).toBe('value');
-    expect(widgets['kpi-verified-recovered'].dataMapping.value[0].id).toBe('verified_amount');
+    expect(widgets['kpi-verified-recovered'].dataMapping.value[0].id).toBe(`${prefix}.verified_amount`);
     expect(widgets['kpi-verified-recovered'].dataMapping.value[0].aggregation).toBe('sum');
 
     expect(widgets['kpi-amount-at-risk']).toBeDefined();
     expect(widgets['kpi-amount-at-risk'].type).toBe('value');
-    expect(widgets['kpi-amount-at-risk'].dataMapping.value[0].id).toBe('amount_at_risk');
+    expect(widgets['kpi-amount-at-risk'].dataMapping.value[0].id).toBe(`${prefix}.amount_at_risk`);
     expect(widgets['kpi-amount-at-risk'].dataMapping.value[0].aggregation).toBe('sum');
 
     expect(widgets['kpi-event-count']).toBeDefined();
     expect(widgets['kpi-event-count'].type).toBe('value');
-    expect(widgets['kpi-event-count'].dataMapping.value[0].id).toBe('event_id');
+    expect(widgets['kpi-event-count'].dataMapping.value[0].id).toBe(`${prefix}.event_id`);
     expect(widgets['kpi-event-count'].dataMapping.value[0].aggregation).toBe('count');
 
     expect(widgets['chart-root-cause']).toBeDefined();
     expect(widgets['chart-root-cause'].type).toBe('bar-chart-grouped');
-    expect(widgets['chart-root-cause'].dataMapping.categoryKey[0].id).toBe('root_cause');
-    expect(widgets['chart-root-cause'].dataMapping.valueKey[0].id).toBe('amount_at_risk');
+    expect(widgets['chart-root-cause'].dataMapping.categoryKey[0].id).toBe(`${prefix}.root_cause`);
+    expect(widgets['chart-root-cause'].dataMapping.valueKey[0].id).toBe(`${prefix}.amount_at_risk`);
     expect(widgets['chart-root-cause'].dataMapping.valueKey[0].aggregation).toBe('sum');
 
     expect(widgets['grid-ledger-events']).toBeDefined();
     expect(widgets['grid-ledger-events'].type).toBe('grid');
     const cols = widgets['grid-ledger-events'].dataMapping.cols.map((c: any) => c.id);
-    expect(cols).toContain('event_id');
-    expect(cols).toContain('customer_ref');
-    expect(cols).toContain('amount_at_risk');
-    expect(cols).toContain('verified_amount');
-    expect(cols).toContain('status');
-    expect(cols).toContain('root_cause');
-    expect(cols).toContain('gateway');
+    expect(cols).toContain(`${prefix}.event_id`);
+    expect(cols).toContain(`${prefix}.customer_ref`);
+    expect(cols).toContain(`${prefix}.created_at`);
+    expect(cols).toContain(`${prefix}.amount_at_risk`);
+    expect(cols).toContain(`${prefix}.verified_amount`);
+    expect(cols).toContain(`${prefix}.status`);
+    expect(cols).toContain(`${prefix}.root_cause`);
+    expect(cols).toContain(`${prefix}.gateway`);
+  });
+
+  it('asserts EVERY field id referenced by any widget exists in the schema derived from the source', () => {
+    const config = buildStudioDashboardConfig(sampleRows, 'USD');
+
+    // Derive schema from data sources using ag-studio's data engine
+    const engine = createDataEngine({
+      sources: config.data.sources,
+    });
+    const viewSchema = (engine as any).dataModel.getViewSchema();
+    const schemaFieldIds = new Set(
+      Object.values(viewSchema.fieldsets).flatMap((fieldset: any) => Object.keys(fieldset.fields))
+    );
+
+    // Collect all field IDs referenced across every widget in the configuration
+    const referencedFieldIds: string[] = [];
+    for (const page of config.initialState.pages) {
+      if (!page.widgets) continue;
+      for (const widget of Object.values(page.widgets)) {
+        const dm = (widget as any).dataMapping;
+        if (!dm) continue;
+        if (Array.isArray(dm.value)) referencedFieldIds.push(...dm.value.map((f: any) => f.id));
+        if (Array.isArray(dm.categoryKey)) referencedFieldIds.push(...dm.categoryKey.map((f: any) => f.id));
+        if (Array.isArray(dm.valueKey)) referencedFieldIds.push(...dm.valueKey.map((f: any) => f.id));
+        if (Array.isArray(dm.cols)) referencedFieldIds.push(...dm.cols.map((f: any) => f.id));
+        if (Array.isArray(dm.sparklineX)) referencedFieldIds.push(...dm.sparklineX.map((f: any) => f.id));
+        if (Array.isArray(dm.legendKey)) referencedFieldIds.push(...dm.legendKey.map((f: any) => f.id));
+        if (Array.isArray(dm.tooltipKey)) referencedFieldIds.push(...dm.tooltipKey.map((f: any) => f.id));
+      }
+    }
+
+    expect(referencedFieldIds.length).toBeGreaterThan(0);
+    for (const fieldId of referencedFieldIds) {
+      expect(
+        schemaFieldIds.has(fieldId),
+        `Field '${fieldId}' does not exist in schema derived from source. Available: ${Array.from(schemaFieldIds).join(', ')}`
+      ).toBe(true);
+    }
   });
 
   it('formats currency using formatCurrency in formats override', () => {
@@ -214,6 +261,45 @@ describe('AG Studio Assistant & Adapter Error Mapping', () => {
     } finally {
       (import.meta.env as any).VITE_STUDIO_AI = original;
     }
+  });
+});
+
+describe('Studio UI Humanized Labels and Badge Rendering', () => {
+  it('humanizes root cause codes into readable title-cased labels', () => {
+    expect(humanizeRootCause('insufficient_funds')).toBe('Insufficient Funds');
+    expect(humanizeRootCause('card_verification_failed')).toBe('Card Verification Failed');
+    expect(humanizeRootCause('expired_card')).toBe('Expired Card');
+    expect(humanizeRootCause('do_not_honor')).toBe('Do Not Honor');
+    expect(humanizeRootCause('')).toBe('Unknown');
+    expect(humanizeRootCause(null)).toBe('Unknown');
+  });
+
+  it('renders AssertionBadgeInfo correctly for gateway_verified, merchant_asserted, and unasserted', () => {
+    const verified = getAssertionBadgeInfo('gateway_verified');
+    expect(verified.label).toBe('Verified');
+    expect(verified.variant).toBe('verified');
+    expect(verified.className).toContain('color-status-recovered');
+    expect(verified.dotClassName).toContain('color-status-recovered');
+
+    const asserted = getAssertionBadgeInfo('merchant_asserted');
+    expect(asserted.label).toBe('Asserted');
+    expect(asserted.variant).toBe('asserted');
+    expect(asserted.className).toContain('color-status-risk');
+    expect(asserted.dotClassName).toContain('color-status-risk');
+
+    const none = getAssertionBadgeInfo(null);
+    expect(none.label).toBe('None');
+    expect(none.variant).toBe('none');
+
+    const undefinedBadge = getAssertionBadgeInfo(undefined);
+    expect(undefinedBadge.label).toBe('None');
+  });
+
+  it('shortens long event IDs with ellipsis and leaves short event IDs intact', () => {
+    expect(formatShortEventId('evt_001', 12)).toBe('evt_001');
+    expect(formatShortEventId('evt_1234567890abcdef', 12)).toBe('evt_1...cdef');
+    expect(formatShortEventId('evt_1234567890abcdef', 12).length).toBe(12);
+    expect(formatShortEventId('', 12)).toBe('');
   });
 });
 
