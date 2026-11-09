@@ -1,6 +1,5 @@
 # Vasooli architecture
 
-Diagrams render on GitHub. For the long-form design notes carried over from the first version, see [../ARCHITECTURE.md](../ARCHITECTURE.md).
 
 ## 1. The recovery pipeline
 
