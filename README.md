@@ -48,7 +48,7 @@ flowchart LR
   ORC["Orchestrator<br/>+ simulated clock"] -. drives .-> DIA
 ```
 
-More diagrams and the trust boundaries: [docs/architecture.md](docs/architecture.md). Detailed design notes: [ARCHITECTURE.md](ARCHITECTURE.md).
+Detailed design notes: [ARCHITECTURE.md](ARCHITECTURE.md).
 
 Key design rules:
 - **The model proposes, deterministic code disposes.** The LLM never writes customer messages and never authorizes anything. A structural `AuthorizedVerdict` type is the only way to reach execution.
