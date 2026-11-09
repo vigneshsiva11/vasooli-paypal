@@ -1,159 +1,342 @@
-# Vasooli
-**A Root-Cause-Aware Revenue Recovery Agent for Failed Payments**
+<div align="center">
 
-Built for the Razorpay Buildathon, Track 03. *Don't retry the payment. Diagnose the leak, choose the right recovery, and prove the money came back.*
+<img src="https://media.giphy.com/media/qgQUggAC3Pfv687qPC/giphy.gif" width="300" alt="Coding GIF" />
 
-## The Problem
-Standard payment recovery tools rely on blind retries or generic reminders that annoy customers and fail to address the actual reason a payment failed. By diagnosing the true root cause—whether it's a technical error, an expired card, or a temporary cash flow issue—a recovery system can choose the correct intervention, dramatically outperforming standard "retry-everything" baselines.
-        
-## The Solution
-Vasooli replaces blind retries with an intelligent pipeline:
-1. **Ingestion**: Standardizes webhooks and API events from payment gateways into a unified format.
-2. **Diagnosis**: Gemini classifies the root cause from event context and customer history.
-3. **Decision**: A deterministic engine scores every candidate intervention by Expected Recovery Value (ERV) using a fixed probability matrix - no LLM involved.
-4. **Policy**: A rules engine evaluates the recommendation against hard business constraints (caps, cooldowns, autonomy tiers).
-5. **Execution**: If authorized, the system triggers the intervention (e.g., generating a payment link or sending a reminder).
-6. **Promise-to-Pay**: Extracts payment commitments from free-text customer messages (LLM-assisted), then tracks them through a safety gate that never chases a customer who has already paid - the gate is a frozen token with a 60-second TTL, unforgeable outside one module.
+### 👋 Hey there, I'm
 
-## Core Architectural Principle
-**The LLM proposes, but the Policy Layer disposes.** To guarantee safety, Gemini never directly executes or authorizes a financial action; it only generates a recommendation. A separate deterministic policy engine evaluates this recommendation, and the executor *only* accepts digitally signed authorizations from the policy engine. 
-*Proof:* In the audit log, a highly-confident recommendation to automatically write off a ₹60,000 debt is explicitly blocked by the `amount_tier` policy check, proving the AI cannot bypass business limits.
+# **Prince R**
 
-## Tech Stack
-| Component | Technology |
-| --- | --- |
-| **Backend** | Python 3.12, FastAPI, Motor |
-| **Database** | MongoDB Atlas |
-| **AI / LLM** | Google Gemini (`gemini-3.5-flash-lite`, `gemini-3.6-flash`) |
-| **Frontend** | Typescript, Vite, Tailwind CSS 4 |
-| **Payment Gateway** | Razorpay |
+<img src="https://readme-typing-svg.demolab.com?font=Fira+Code&pause=1000&color=7C3AED&center=true&vCenter=true&multiline=true&repeat=true&width=500&height=100&lines=Student+Developer;Full-Stack+Enthusiast" alt="Typing SVG" />
 
-## Architecture
-```mermaid
-flowchart TD
-    %% Define styles
-    classDef llm fill:#f9e5ff,stroke:#d1b3ff,stroke-width:2px,color:#333
-    classDef deterministic fill:#e5f2ff,stroke:#b3d9ff,stroke-width:2px,color:#333
-    classDef boundary fill:none,stroke:#ff6b6b,stroke-width:4px,stroke-dasharray: 5 5
+<br/>
 
-    %% Nodes
-    Gate[Payment Webhooks]:::deterministic
-    Ingest[Stage 1: Ingestion\nStandardizes Event]:::deterministic
-    Diag[Stage 2: Diagnosis\nLLM finds root cause]:::llm
-    Decide[Stage 3: Decision\nDeterministic ERV matrix]:::deterministic
-    Policy[Stage 4: Policy\nDeterministic Rules Engine]:::deterministic
-    Exec[Stage 5: Execution\nTriggers Intervention]:::deterministic
-    Verify[Stage 6: Verification\nConfirm Recovery]:::deterministic
+![Profile Views](https://komarev.com/ghpvc/?username=princekumar-dev&color=7C3AED&style=for-the-badge&label=PROFILE+VIEWS)
+![GitHub followers](https://img.shields.io/github/followers/princekumar-dev?color=7c3aed&style=for-the-badge&label=FOLLOWERS)
+![GitHub stars](https://img.shields.io/github/stars/princekumar-dev?color=fbbf24&style=for-the-badge&label=STARS)
+![Open to work](https://img.shields.io/badge/🟢_OPEN_TO_WORK-00C853?style=for-the-badge&labelColor=000000)
 
-    %% Connections
-    Gate --> Ingest
-    Ingest --> Diag
-    Diag --> Decide
-    Decide -->|"Recommendation"| Policy
-    Policy -->|"Authorized Verdict ONLY"| Exec
-    Exec --> Verify
+<br/>
 
-    %% Boundary
-    subgraph Strict Boundary
-        Policy
-    end
-    style Strict Boundary fill:none,stroke:#ff6b6b,stroke-width:4px,stroke-dasharray: 5 5,color:#ff6b6b
-```
+[![LinkedIn](https://img.shields.io/badge/LinkedIn-0A66C2?style=for-the-badge&logo=linkedin&logoColor=white)](https://www.linkedin.com/in/prince-r-b9685130b/)
+[![Instagram](https://img.shields.io/badge/Instagram-E4405F?style=for-the-badge&logo=instagram&logoColor=white)](https://www.instagram.com/prince_r_94)
+[![Email](https://img.shields.io/badge/Email-D14836?style=for-the-badge&logo=gmail&logoColor=white)](mailto:prince55833kumar@gmail.com)
+[![Portfolio](https://img.shields.io/badge/Portfolio-000000?style=for-the-badge&logo=about-dot-me&logoColor=white)](https://my-portfolio-077.vercel.app/)
+[![Buy Me A Coffee](https://img.shields.io/badge/Buy_Me_A_Coffee-FFDD00?style=for-the-badge&logo=buy-me-a-coffee&logoColor=black)](https://www.buymeacoffee.com/princekumar-dev)
+[![GitHub Sponsors](https://img.shields.io/badge/GitHub_Sponsors-EA4AAA?style=for-the-badge&logo=githubsponsors&logoColor=white)](https://github.com/sponsors/princekumar-dev)
 
-## Key Features
-- **Root-Cause Awareness:** Distinguishes between 18 root causes across 4 revenue surfaces (payments, checkouts, subscriptions, receivables).
-- **Expected Recovery Value (ERV):** Scores every candidate intervention against a fixed probability matrix; picks the one with the highest net expected return.
-- **Bounded Autonomy:** Hard limits on what the system can authorize without human approval (₹5k auto ceiling, ₹25k never-auto floor, 3-contact cap, 24h cooldown).
-- **Rulebook Fingerprinting:** Every policy verdict is stamped with a SHA-256 hash of the exact parameters in force, so historical decisions are auditable even after the rules change.
-- **Safe Promise-to-Pay (PTP):** Extracts commitments from free-text, verified by deterministic bounds checks (date horizon, amount cap, paid-status gate).
-- **Audit Trail Explorer:** Per-event timeline showing every diagnosis, decision, policy verdict (with all six checks), execution, and verification - the full chain of evidence in one view.
-- **Dual Verification Split:** Every recovery figure is reported as gateway-verified (Razorpay webhook with signature check) vs. manually-asserted (merchant confirmation). The two are never blended into one number.
+<br/>
 
-## Real Results
-The following metrics are pulled directly from the live `GET /metrics/summary` and `GET /metrics/baseline-comparison` endpoints on our synthetic dataset of 305 revenue-at-risk events across payments, checkouts, subscriptions, and receivables:
+</div>
 
-**Recovery Performance (Actuals)**
-| Metric | Value |
-| :--- | :--- |
-| **Total Revenue at Risk** | ₹21,87,218.02 |
-| **Gateway Verified Recovered** | ₹29,605.14 |
-| **Headline Recovery Rate (Verified)** | **1.35%** |
-| **Cohort Recovery Rate (Link-producing)** | **39.53%** |
+---
 
-**Baseline Comparison (Simulated Expected Value)**
-| Strategy | Gross Expected Recovery |
-| :--- | :--- |
-| Baseline: Retry Everything | ₹1,42,653.43 |
-| Baseline: Generic Reminder | ₹5,62,286.04 |
-| **Vasooli AI Recommended** | **₹9,28,687.91** |
+## 🧑 **About Me**
 
-*Vasooli outperforms the best baseline strategy by **1.65×**.*
+<table>
+<tr>
+<td width="50%">
 
-## Screenshots
-| Overview Dashboard | Root Cause Analysis |
-|:---:|:---:|
-| ![Overview](docs/screenshots/01-overview.png) | ![Root Cause](docs/screenshots/02-root-cause.png) |
+🎯 **Current Focus**
+- 🔭 Building **full-stack web applications**
+- 🌱 Currently learning **System Design & Cloud Architecture**
+- 💡 Exploring **AI/ML** integration in web apps
+- 🎯 Goal: Build impactful products that solve real problems
 
-| Baseline Comparison | Promise to Pay |
-|:---:|:---:|
-| ![Baseline Comparison](docs/screenshots/03-baseline.png) | ![Promise to Pay](docs/screenshots/04-promise-to-pay.png) |
+</td>
+<td width="50%">
 
-| Audit Trail |
-|:---:|
-| ![Audit Trail](docs/screenshots/05-audit-trail.png) |
+⚡ **Quick Facts**
+- 🎓 Student developer passionate about **crafting impactful software**
+- 💻 Tech Stack: **Python, JavaScript, TypeScript, React, Node.js, Flask**
+- 🏆 **Hackathon participant** & open-source contributor
+- 📫 Reach me on [LinkedIn](https://www.linkedin.com/in/prince-r-b9685130b/) or [Email](mailto:prince55833kumar@gmail.com)
 
-## Setup & Local Development
+</td>
+</tr>
+</table>
 
-1. **Clone and Install Backend**
-```bash
-python -m venv .venv
-source .venv/bin/activate  # Or .\.venv\Scripts\activate on Windows
-pip install -r requirements.txt
-```
+> 💬 *"Ask me about Web Development, Python Scripting, or anything tech!"*
 
-2. **Environment Variables** (create `.env` in root)
-```env
-MONGODB_URI=your_mongodb_uri
-GEMINI_API_KEY=your_gemini_key
-GEMINI_MODEL=gemini-3.6-flash          # primary model; gemini-3.5-flash-lite is the quota-fallback
-RAZORPAY_KEY_ID=your_rzp_key
-RAZORPAY_KEY_SECRET=your_rzp_secret
-```
+---
 
-3. **Run Backend**
-```bash
-uvicorn app.main:app --port 8124
-```
+## ⚡ **What I Build**
 
-4. **Run Frontend**
-```bash
-cd frontend
-cp .env.example .env  # or create .env with:
-# VITE_API_BASE_URL=http://127.0.0.1:8124
-npm install
-npm run dev
-```
+<table>
+<tr>
+<td align="center" width="33%">
 
-## Known Limitations
-1. **Simulated Payments:** All recovered money reported here is simulated via Razorpay payment links. No payment was genuinely completed end-to-end because Razorpay's hosted checkout requires manual browser interaction.
-2. **Razorpay Link Cap:** Razorpay test-mode accounts have a strict 30-link lifetime cap per merchant account, limiting large-scale test executions.
-3. **Manual Verifications:** Contact-type interventions (like reminders) are structurally unverifiable by gateway webhooks and require a merchant's manual confirmation to count as recovered.
+🌐 **Full-Stack Apps
 
-## Build Challenges & Technical Obstacles
+</td>
+<td align="center" width="33%">
 
-**Enforcing the LLM-recommends/policy-authorizes split structurally, not by convention.** It's easy to say "the AI only recommends" - proving it required making unauthorized action literally unconstructable in code. The `Decision` model has no field for authorization or execution and rejects any attempt to add one; the executor's input type only accepts an already-authorized verdict, so there's no code branch to bypass because a blocked verdict can't even be constructed as its argument. We adversarially tested this with a prompt-injection attempt requesting a ₹91,000 refund - the type system silently discarded it.
+🤖 **AI-Powered Tools
 
-**Diagnosing Razorpay's real test-mode limits.** Test-mode payment links have a hidden 30-link *lifetime* cap per account, separate from a burst limit of roughly 5 creates per minute. We initially misdiagnosed the burst limit as the lifetime cap, since both produced an identical "5 succeed, then refused" symptom on different accounts for different reasons. Resolving it required isolating each limit with targeted API probes rather than trusting the first plausible explanation.
+</td>
+<td align="center" width="33%">
 
-**Making historical policy decisions provably re-derivable after rules change.** Business rules get tuned during development, but old decisions still needed to be explainable under the rules actually in effect when they were made - not silently reinterpreted under today's rules. We fingerprint every policy verdict with a hash of its exact rulebook parameters, so any verdict can be replayed and verified against its own historical rulebook.
+📊 **Data Dashboards
 
-**Closing a race condition in Promise-to-Pay's safety check.** The obvious implementation - check payment status, then branch - doesn't guarantee the check actually happened before a follow-up fires. We closed this by making "customer hasn't paid" a short-lived, unforgeable token that the follow-up function requires as a mandatory argument: there is no code path that sends a follow-up without holding proof of that check.
+</td>
+</tr>
+<tr>
+<td align="center" width="33%">
 
-## What's Next
-- **End-to-End Test Automation:** Implement browser automation (Playwright/Puppeteer) to programmatically complete Razorpay checkouts and trigger real webhooks.
-- **Automated PTP Scheduler:** Build a cron-driven scheduler to automatically follow up on promises-to-pay when their horizon dates pass.
-- **Multi-Currency Support:** Add live FX conversion to support international payment gateways and non-INR events.
+REST APIs & CRUD
 
-## Documentation
-- **[ARCHITECTURE.md](ARCHITECTURE.md)** - Full technical reference: data models, intervention matrix, policy rulebook, fingerprinting, verification sources, and the four-layer recommend/authorize boundary.
+</td>
+<td align="center" width="33%">
 
+ML Model Integration
+
+</td>
+<td align="center" width="33%">
+
+Real-Time Analytics
+
+</td>
+</tr>
+</table>
+
+---
+
+## 🛠️ **Tech Stack**
+
+<table>
+<tr>
+<td align="center" width="96">
+<img src="https://cdn.jsdelivr.net/gh/devicons/devicon/icons/python/python-original.svg" width="48" height="48" alt="Python" />
+<br>
+<strong>Python</strong>
+</td>
+<td align="center" width="96">
+<img src="https://cdn.jsdelivr.net/gh/devicons/devicon/icons/javascript/javascript-original.svg" width="48" height="48" alt="JavaScript" />
+<br>
+<strong>JavaScript</strong>
+</td>
+<td align="center" width="96">
+<img src="https://cdn.jsdelivr.net/gh/devicons/devicon/icons/typescript/typescript-original.svg" width="48" height="48" alt="TypeScript" />
+<br>
+<strong>TypeScript</strong>
+</td>
+<td align="center" width="96">
+<img src="https://cdn.jsdelivr.net/gh/devicons/devicon/icons/java/java-original.svg" width="48" height="48" alt="Java" />
+<br>
+<strong>Java</strong>
+</td>
+<td align="center" width="96">
+<img src="https://cdn.jsdelivr.net/gh/devicons/devicon/icons/html5/html5-original.svg" width="48" height="48" alt="HTML5" />
+<br>
+<strong>HTML5</strong>
+</td>
+<td align="center" width="96">
+<img src="https://cdn.jsdelivr.net/gh/devicons/devicon/icons/css3/css3-original.svg" width="48" height="48" alt="CSS3" />
+<br>
+<strong>CSS3</strong>
+</td>
+</tr>
+<tr>
+<td align="center" width="96">
+<img src="https://cdn.jsdelivr.net/gh/devicons/devicon/icons/react/react-original.svg" width="48" height="48" alt="React" />
+<br>
+<strong>React</strong>
+</td>
+<td align="center" width="96">
+<img src="https://cdn.jsdelivr.net/gh/devicons/devicon/icons/nextjs/nextjs-original.svg" width="48" height="48" alt="Next.js" />
+<br>
+<strong>Next.js</strong>
+</td>
+<td align="center" width="96">
+<img src="https://cdn.jsdelivr.net/gh/devicons/devicon/icons/nodejs/nodejs-original.svg" width="48" height="48" alt="Node.js" />
+<br>
+<strong>Node.js</strong>
+</td>
+<td align="center" width="96">
+<img src="https://cdn.jsdelivr.net/gh/devicons/devicon/icons/flask/flask-original.svg" width="48" height="48" alt="Flask" />
+<br>
+<strong>Flask</strong>
+</td>
+<td align="center" width="96">
+<img src="https://cdn.jsdelivr.net/gh/devicons/devicon/icons/tailwindcss/tailwindcss-original.svg" width="48" height="48" alt="Tailwind" />
+<br>
+<strong>Tailwind</strong>
+</td>
+<td align="center" width="96">
+<img src="https://cdn.jsdelivr.net/gh/devicons/devicon/icons/mongodb/mongodb-original.svg" width="48" height="48" alt="MongoDB" />
+<br>
+<strong>MongoDB</strong>
+</td>
+</tr>
+<tr>
+<td align="center" width="96">
+<img src="https://cdn.jsdelivr.net/gh/devicons/devicon/icons/mysql/mysql-original.svg" width="48" height="48" alt="MySQL" />
+<br>
+<strong>MySQL</strong>
+</td>
+<td align="center" width="96">
+<img src="https://cdn.jsdelivr.net/gh/devicons/devicon/icons/git/git-original.svg" width="48" height="48" alt="Git" />
+<br>
+<strong>Git</strong>
+</td>
+<td align="center" width="96">
+<img src="https://cdn.jsdelivr.net/gh/devicons/devicon/icons/github/github-original.svg" width="48" height="48" alt="GitHub" />
+<br>
+<strong>GitHub</strong>
+</td>
+<td align="center" width="96">
+<img src="https://cdn.jsdelivr.net/gh/devicons/devicon/icons/vscode/vscode-original.svg" width="48" height="48" alt="VS Code" />
+<br>
+<strong>VS Code</strong>
+</td>
+<td align="center" width="96">
+<img src="https://cdn.jsdelivr.net/gh/devicons/devicon/icons/linux/linux-original.svg" width="48" height="48" alt="Linux" />
+<br>
+<strong>Linux</strong>
+</td>
+<td align="center" width="96">
+<img src="https://cdn.jsdelivr.net/gh/devicons/devicon/icons/figma/figma-original.svg" width="48" height="48" alt="Figma" />
+<br>
+<strong>Figma</strong>
+</td>
+</tr>
+</table>
+
+---
+
+## 📊 **GitHub Stats**
+
+<table>
+<tr>
+<td width="50%">
+<img src="https://github-readme-stats.vercel.app/api?username=princekumar-dev&show_icons=true&theme=radical&count_private=true&hide_border=true" alt="GitHub Stats" width="100%" />
+</td>
+<td width="50%">
+<img src="https://github-readme-stats.vercel.app/api/top-langs/?username=princekumar-dev&layout=compact&theme=radical&hide_border=true" alt="Top Languages" width="100%" />
+</td>
+</tr>
+</table>
+
+<p align="center">
+<img src="https://github-readme-streak-stats.herokuapp.com/?user=princekumar-dev&theme=radical&hide_border=true" alt="GitHub Streak" />
+</p>
+
+<p align="center">
+<img src="https://github-readme-activity-graph.vercel.app/graph?username=princekumar-dev&theme=react-dark&hide_border=true" alt="Contributions Graph" width="100%" />
+</p>
+
+<p align="center">
+<img src="https://github-profile-trophy.vercel.app/?username=princekumar-dev&theme=radical&no-frame=true&no-bg=true&column=7" alt="GitHub Trophies" width="100%" />
+</p>
+
+---
+
+## 🚀 **Featured Projects**
+
+<table>
+<tr>
+<td width="50%">
+
+### 📚 Smart Classroom & TimeTable Scheduler
+
+An intelligent system to automate classroom and timetable management using constraint-based optimization.
+
+`TypeScript` `React` `Node.js`
+
+[![View Project](https://img.shields.io/badge/VIEW_PROJECT-7C3AED?style=for-the-badge)](https://github.com/princekumar-dev/Smart_Classroom_And_TimeTable_Scheduler)
+
+</td>
+<td width="50%">
+
+### 🚚 LogiPilot AI
+
+AI-powered logistics platform that predicts shipment delays, optimizes delivery routes, and monitors fleets in real-time.
+
+`TypeScript` `AI/ML` `Real-Time`
+
+[![View Project](https://img.shields.io/badge/VIEW_PROJECT-3B82F6?style=for-the-badge)](https://github.com/princekumar-dev/Logipilot)
+
+</td>
+</tr>
+<tr>
+<td width="50%">
+
+### ⚡ EnergySage
+
+AI-powered platform for monitoring, forecasting, and optimizing energy use for households and industries.
+
+`TypeScript` `AI` `Data Viz`
+
+[![View Project](https://img.shields.io/badge/VIEW_PROJECT-10B981?style=for-the-badge)](https://github.com/princekumar-dev/EnergySage)
+
+</td>
+<td width="50%">
+
+### 🧮 GPA Calculator
+
+A sleek, web-based GPA Calculator built with Flask — real-time accuracy, responsive UI, and robust error handling.
+
+`JavaScript` `Flask` `Python`
+
+[![View Project](https://img.shields.io/badge/VIEW_PROJECT-F59E0B?style=for-the-badge)](https://github.com/princekumar-dev/GPA---Calculator-)
+
+</td>
+</tr>
+<tr>
+<td width="50%">
+
+### 🎬 Netflix Homepage Clone
+
+A clean, visually striking static clone of the Netflix homepage with responsive design.
+
+`HTML` `CSS` `Responsive`
+
+[![View Project](https://img.shields.io/badge/VIEW_PROJECT-EF4444?style=for-the-badge)](https://github.com/princekumar-dev/Netfly---Homepage-Clone-Of-NETFLIX)
+
+</td>
+<td width="50%">
+
+### 🏛️ MSEC Connect
+
+Full-stack venue booking platform for seminar halls and auditoriums at MSEC.
+
+`JavaScript` `Full-Stack` `Booking`
+
+[![View Project](https://img.shields.io/badge/VIEW_PROJECT-06B6D4?style=for-the-badge)](https://github.com/princekumar-dev/Connect)
+
+</td>
+</tr>
+</table>
+
+---
+
+## 🏆 **Achievements**
+
+<p align="center">
+<a href="https://github.com/princekumar-dev">
+<img src="https://github.githubassets.com/assets/quickdraw-default-39c6aec8ff89.png" width="100" alt="Quickdraw" />
+<img src="https://github.githubassets.com/assets/pull-shark-default-498c279a747d.png" width="100" alt="Pull Shark" />
+<img src="https://github.githubassets.com/assets/pair-extraordinaire-default-579438a20e01.png" width="100" alt="Pair Extraordinaire" />
+</a>
+</p>
+
+---
+
+## 💡 **Daily Motivation**
+
+![Motivational Quote](https://quotes-github-readme.vercel.app/api?type=horizontal&theme=tokyonight)
+
+---
+
+## 📫 **Let's Connect**
+
+[![LinkedIn](https://img.shields.io/badge/LinkedIn-0A66C2?style=for-the-badge&logo=linkedin&logoColor=white)](https://www.linkedin.com/in/prince-r-b9685130b/)
+[![Instagram](https://img.shields.io/badge/Instagram-E4405F?style=for-the-badge&logo=instagram&logoColor=white)](https://www.instagram.com/prince_r_94)
+[![GitHub](https://img.shields.io/badge/GitHub-181717?style=for-the-badge&logo=github&logoColor=white)](https://github.com/princekumar-dev)
+[![Email](https://img.shields.io/badge/Email-D14836?style=for-the-badge&logo=gmail&logoColor=white)](mailto:prince55833kumar@gmail.com)
+[![Buy Me A Coffee](https://img.shields.io/badge/Buy_Me_A_Coffee-FFDD00?style=for-the-badge&logo=buy-me-a-coffee&logoColor=black)](https://www.buymeacoffee.com/princekumar-dev)
+
+<br/>
+
+![Thanks](https://img.shields.io/badge/⭐_Thanks_for_visiting!-7C3AED?style=for-the-badge&labelColor=000000)
+
+**Built with ❤️ by [Prince R](https://github.com/princekumar-dev)**
