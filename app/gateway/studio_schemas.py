@@ -169,8 +169,14 @@ BUNDLED_STUDIO_TOOLS: dict[str, dict[str, Any]] = {
         "parameters": {
             "type": "object",
             "properties": {
-                "widgetUpdates": {"type": "array"},
-                "filterUpdates": {"type": "array"},
+                "widgetUpdates": {
+                    "type": "array",
+                    "items": {"type": "object"},
+                },
+                "filterUpdates": {
+                    "type": "array",
+                    "items": {"type": "object"},
+                },
             },
         },
     },
@@ -222,6 +228,102 @@ BUNDLED_STUDIO_TOOLS: dict[str, dict[str, Any]] = {
 }
 
 
+def sanitize_schema_for_gemini(node: Any) -> Any:
+    """Recursively convert a JSON schema node into Gemini's supported FunctionDeclaration subset.
+
+    Rules:
+    - Strips unsupported keywords: additionalProperties, $schema, $ref, $defs, definitions, default, examples, example.
+    - Converts type arrays like ["string", "null"] to single type + nullable=True.
+    - Ensures array schemas have an 'items' definition.
+    - Ensures object schemas only have valid 'properties' and 'required' lists referencing existing properties.
+    """
+    if not isinstance(node, dict):
+        return node
+
+    cleaned: dict[str, Any] = {}
+
+    # 1. Type and nullable
+    raw_type = node.get("type")
+    is_nullable = bool(node.get("nullable", False))
+
+    if isinstance(raw_type, (list, tuple)):
+        types_list = [str(t) for t in raw_type if str(t).lower() != "null"]
+        if any(str(t).lower() == "null" for t in raw_type):
+            is_nullable = True
+        cleaned["type"] = types_list[0] if types_list else "string"
+    elif isinstance(raw_type, str):
+        cleaned["type"] = raw_type
+    elif raw_type is not None:
+        cleaned["type"] = str(raw_type)
+
+    if is_nullable:
+        cleaned["nullable"] = True
+
+    # 2. Description
+    if "description" in node and isinstance(node["description"], str):
+        cleaned["description"] = node["description"]
+
+    # 3. Enum
+    if "enum" in node and isinstance(node["enum"], (list, tuple)):
+        cleaned["enum"] = [str(x) for x in node["enum"]]
+
+    # 4. Format
+    if "format" in node and isinstance(node["format"], str):
+        cleaned["format"] = node["format"]
+
+    # 5. Object properties
+    if cleaned.get("type") == "object" or "properties" in node:
+        cleaned["type"] = "object"
+        raw_props = node.get("properties", {})
+        cleaned_props: dict[str, Any] = {}
+        if isinstance(raw_props, dict):
+            for prop_name, prop_val in raw_props.items():
+                cleaned_props[str(prop_name)] = sanitize_schema_for_gemini(prop_val)
+        cleaned["properties"] = cleaned_props
+
+        # Required properties
+        raw_req = node.get("required", [])
+        if isinstance(raw_req, (list, tuple)):
+            valid_req = [str(r) for r in raw_req if str(r) in cleaned_props]
+            if valid_req:
+                cleaned["required"] = valid_req
+
+    # 6. Array items
+    if cleaned.get("type") == "array" or "items" in node:
+        cleaned["type"] = "array"
+        raw_items = node.get("items")
+        if raw_items is not None and isinstance(raw_items, dict):
+            cleaned["items"] = sanitize_schema_for_gemini(raw_items)
+        else:
+            cleaned["items"] = {"type": "object", "properties": {}}
+
+    return cleaned
+
+
+def _normalize_params(params: dict[str, Any]) -> dict[str, Any]:
+    """Normalize parameters for comparison against bundled Studio tool definitions."""
+    return sanitize_schema_for_gemini(params)
+
+
+def sanitize_tools_for_gemini(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Sanitize a list of tools into Gemini's supported FunctionDeclaration subset."""
+    sanitized: list[dict[str, Any]] = []
+    for tool in tools:
+        if not isinstance(tool, dict):
+            continue
+        cleaned_tool: dict[str, Any] = {
+            "name": str(tool.get("name", "")),
+            "description": str(tool.get("description", "")),
+        }
+        params = tool.get("parameters", {})
+        if isinstance(params, dict):
+            cleaned_tool["parameters"] = sanitize_schema_for_gemini(params)
+        else:
+            cleaned_tool["parameters"] = {"type": "object", "properties": {}}
+        sanitized.append(cleaned_tool)
+    return sanitized
+
+
 def validate_studio_tools(client_tools: Any) -> tuple[bool, str | None]:
     """Validate that client-supplied tools match the bundled Studio tools EXACTLY.
 
@@ -246,7 +348,7 @@ def validate_studio_tools(client_tools: Any) -> tuple[bool, str | None]:
         expected_params = expected_tool.get("parameters", {})
         client_params = tool.get("parameters", {})
 
-        if client_params != expected_params:
+        if client_params != expected_params and _normalize_params(client_params) != _normalize_params(expected_params):
             return False, f"Tool schema mismatch for tool: {name}"
 
     return True, None

@@ -5849,8 +5849,8 @@ def test_step16_studio_ai_proxy() -> None:
         client = TestClient(app, raise_server_exceptions=False)
         r_disabled = client.post("/ai/studio", json={"input": []})
         report(
-            "16.1 Studio AI disabled: POST /ai/studio returns 503 fail-closed",
-            r_disabled.status_code == 503 and r_disabled.json().get("code") == "studio_ai_disabled",
+            "16.1 Studio AI disabled: POST /ai/studio returns 503 with error studio_ai_disabled",
+            r_disabled.status_code == 503 and r_disabled.json().get("error") == "studio_ai_disabled",
             f"status={r_disabled.status_code}, body={r_disabled.json()}",
         )
 
@@ -6175,6 +6175,186 @@ def test_step16_studio_ai_proxy() -> None:
             "16.9 Gemini 503 retries primary model, then tries fallback model, then fails clean",
             exhausted and calls_made == expected_sequence,
             f"calls_made={calls_made}, exhausted={exhausted}",
+        )
+
+        # 16.9a Gemini timeout/busy returns 503 with error studio_ai_busy
+        class MockClientBusy:
+            class aio:
+                class models:
+                    @staticmethod
+                    async def generate_content(model: str, contents: Any, **kwargs: Any) -> Any:
+                        raise TimeoutError("Deadline exceeded")
+
+        with patch("app.routes.studio_ai.get_settings") as mock_s, \
+             patch("app.middleware.get_settings") as mock_m:
+            mock_s.return_value = s_enabled
+            mock_m.return_value = s_enabled
+            app.state.gemini_client = MockClientBusy()
+            client_busy = TestClient(app, raise_server_exceptions=False)
+            r_busy = client_busy.post("/ai/studio", json={"input": [{"role": "user", "content": "busy test"}]})
+            app.state.gemini_client = None
+
+        report(
+            "16.9a Gemini timeout/busy returns 503 with error studio_ai_busy",
+            r_busy.status_code == 503 and r_busy.json().get("error") == "studio_ai_busy",
+            f"status={r_busy.status_code}, error={r_busy.json().get('error')}",
+        )
+
+        # 16.9b Non-retryable Gemini 4xx halts without retries, returns 502 with error studio_ai_upstream_error
+        calls_400: list[str] = []
+
+        class MockClient400:
+            class aio:
+                class models:
+                    @staticmethod
+                    async def generate_content(model: str, contents: Any, **kwargs: Any) -> Any:
+                        calls_400.append(model)
+                        try:
+                            from google.genai.errors import ClientError
+                            raise ClientError(400, {"error": {"code": 400, "message": "missing field"}})
+                        except ImportError:
+                            err = Exception("ClientError")
+                            setattr(err, "code", 400)
+                            raise err
+
+        with patch("app.routes.studio_ai.get_settings") as mock_s, \
+             patch("app.middleware.get_settings") as mock_m:
+            mock_s.return_value = s_enabled
+            mock_m.return_value = s_enabled
+            app.state.gemini_client = MockClient400()
+
+            client_test = TestClient(app, raise_server_exceptions=False)
+            r_400 = client_test.post("/ai/studio", json={"input": [{"role": "user", "content": "test 400"}]})
+            app.state.gemini_client = None
+
+        report(
+            "16.9b Non-retryable Gemini 4xx halts without retries, returns 502 with error studio_ai_upstream_error",
+            r_400.status_code == 502 and r_400.json().get("error") == "studio_ai_upstream_error" and calls_400 == ["gemini-3.6-flash"],
+            f"status={r_400.status_code}, error={r_400.json().get('error')}, calls={calls_400}",
+        )
+
+        # 16.9c Tools schema compliance: all array parameters define items for Gemini OpenAPI validation
+        from app.gateway.studio_schemas import BUNDLED_STUDIO_TOOLS, sanitize_tools_for_gemini
+        sanitized = sanitize_tools_for_gemini(list(BUNDLED_STUDIO_TOOLS.values()))
+        arrays_have_items = True
+        for t in sanitized:
+            props = t.get("parameters", {}).get("properties", {})
+            for p_name, p_schema in props.items():
+                if isinstance(p_schema, dict) and p_schema.get("type") == "array":
+                    if "items" not in p_schema or not p_schema["items"]:
+                        arrays_have_items = False
+        report(
+            "16.9c Tool schema request construction: array schemas define items property",
+            arrays_have_items,
+            f"arrays_have_items={arrays_have_items}",
+        )
+
+        # 16.9d toolChoice modes correctly map to function calling config
+        captured_configs: list[Any] = []
+        class MockConfigCaptureClient:
+            class aio:
+                class models:
+                    @staticmethod
+                    async def generate_content(model: str, contents: Any, **kwargs: Any) -> Any:
+                        captured_configs.append(kwargs.get("config"))
+                        return {"candidates": [{"content": {"parts": [{"text": "ok"}]}}]}
+
+        clear_response_cache()
+        clear_offline_counters()
+        with patch("app.routes.studio_ai.get_settings") as mock_s, \
+             patch("app.middleware.get_settings") as mock_m:
+            mock_s.return_value = s_enabled
+            mock_m.return_value = s_enabled
+            app.state.gemini_client = MockConfigCaptureClient()
+            client_cfg = TestClient(app, raise_server_exceptions=False)
+
+            client_cfg.post("/ai/studio", json={"input": [{"role": "user", "content": "hi"}], "toolChoice": "none"})
+            client_cfg.post("/ai/studio", json={"input": [{"role": "user", "content": "hi"}], "toolChoice": "required"})
+            client_cfg.post("/ai/studio", json={"input": [{"role": "user", "content": "hi"}], "toolChoice": {"name": "view_schema"}})
+            app.state.gemini_client = None
+
+        def _get_mode_and_names(cfg: Any) -> tuple[str, list[str] | None]:
+            tc = getattr(cfg, "tool_config", None) or (cfg.get("tool_config") if isinstance(cfg, dict) else None)
+            if not tc:
+                return "", None
+            fc = getattr(tc, "function_calling_config", None) or (tc.get("function_calling_config") if isinstance(tc, dict) else None)
+            if not fc:
+                return "", None
+            mode = getattr(fc, "mode", None) or (fc.get("mode") if isinstance(fc, dict) else None)
+            names = getattr(fc, "allowed_function_names", None) or (fc.get("allowed_function_names") if isinstance(fc, dict) else None)
+            return str(mode).upper(), names
+
+        mode1, _ = _get_mode_and_names(captured_configs[0])
+        mode2, _ = _get_mode_and_names(captured_configs[1])
+        mode3, names3 = _get_mode_and_names(captured_configs[2])
+        tool_choice_ok = "NONE" in mode1 and "ANY" in mode2 and "ANY" in mode3 and names3 == ["view_schema"]
+        report(
+            "16.9d toolChoice maps cleanly to NONE, ANY, and named function calling config",
+            tool_choice_ok,
+            f"mode1={mode1}, mode2={mode2}, mode3={mode3}, names3={names3}",
+        )
+
+        # 16.9e Compatibility with fallback model gemini-3.5-flash-lite
+        with patch("app.routes.studio_ai.get_settings") as mock_s, \
+             patch("app.middleware.get_settings") as mock_m:
+            mock_s.return_value = s_enabled
+            mock_m.return_value = s_enabled
+            app.state.gemini_client = MockConfigCaptureClient()
+            client_fb = TestClient(app, raise_server_exceptions=False)
+            r_fb = client_fb.post("/ai/studio", json={"model": "gemini-3.5-flash-lite", "input": [{"role": "user", "content": "hi"}]})
+            app.state.gemini_client = None
+
+        report(
+            "16.9e Compatibility with fallback model gemini-3.5-flash-lite passes request construction",
+            r_fb.status_code == 200,
+            f"status={r_fb.status_code}",
+        )
+
+        # 16.9f Schema sanitizer: real Studio tool schema in, Gemini-valid declaration out
+        studio_tool_schema = {
+            "name": "view_schema",
+            "description": "View schema with JSON schema keywords",
+            "parameters": {
+                "$schema": "http://json-schema.org/draft-07/schema#",
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "field": {
+                        "type": ["string", "null"],
+                        "default": "value",
+                        "examples": ["val1", "val2"],
+                        "description": "A field",
+                    },
+                    "tags": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "properties": {
+                                "tag_id": {"type": "string"}
+                            }
+                        }
+                    }
+                },
+                "required": ["field"]
+            }
+        }
+        sanitized_decl = sanitize_tools_for_gemini([studio_tool_schema])[0]
+        params = sanitized_decl["parameters"]
+        has_no_forbidden = (
+            "additionalProperties" not in params
+            and "$schema" not in params
+            and "default" not in params["properties"]["field"]
+            and "examples" not in params["properties"]["field"]
+            and "additionalProperties" not in params["properties"]["tags"]["items"]
+        )
+        field_type_valid = params["properties"]["field"]["type"] == "string" and params["properties"]["field"]["nullable"] is True
+        tags_type_valid = params["properties"]["tags"]["type"] == "array" and "items" in params["properties"]["tags"]
+        sanitizer_ok = has_no_forbidden and field_type_valid and tags_type_valid
+        report(
+            "16.9f Schema sanitizer: converts Studio tool schema to Gemini-valid declaration subset",
+            sanitizer_ok,
+            f"no_forbidden={has_no_forbidden}, field_valid={field_type_valid}, tags_valid={tags_type_valid}",
         )
 
     asyncio.run(_test_gemini_fallback_logic())

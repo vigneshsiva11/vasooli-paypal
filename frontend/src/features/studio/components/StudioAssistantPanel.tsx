@@ -160,7 +160,12 @@ export const StudioAssistantPanel: React.FC = () => {
               : msg
           )
         );
-      } else if (accumulated.includes('switched off or busy')) {
+      } else if (
+        accumulated.includes('switched off') ||
+        accumulated.includes('busy') ||
+        accumulated.includes('upstream error') ||
+        accumulated.includes('dashboard still works')
+      ) {
         const errInfo: AiErrorInfo = {
           type: 'service_unavailable',
           message: accumulated,
@@ -332,7 +337,7 @@ export const StudioAssistantPanel: React.FC = () => {
                       <span>Assistant Unavailable</span>
                     </div>
                     <p className="text-[11px] leading-relaxed">
-                      The assistant is switched off or busy; the dashboard still works
+                      {m.text || 'The assistant is switched off or busy; the dashboard still works'}
                     </p>
                   </div>
                 ) : m.errorType === 'network' ? (

@@ -38,7 +38,8 @@ export interface AiErrorInfo {
 export function parseAiError(
   status: number | null | undefined,
   retryAfter?: number | string | null,
-  rawError?: unknown
+  rawError?: unknown,
+  errorCode?: string | null
 ): AiErrorInfo {
   if (status === 429) {
     const seconds = Math.max(1, Number(retryAfter) || 60);
@@ -49,9 +50,27 @@ export function parseAiError(
     };
   }
   if (status === 503) {
+    if (errorCode === 'studio_ai_disabled') {
+      return {
+        type: 'service_unavailable',
+        message: 'The assistant is switched off; the dashboard still works',
+      };
+    }
+    if (errorCode === 'studio_ai_busy') {
+      return {
+        type: 'service_unavailable',
+        message: 'The assistant is busy; the dashboard still works',
+      };
+    }
     return {
       type: 'service_unavailable',
       message: 'The assistant is switched off or busy; the dashboard still works',
+    };
+  }
+  if (status === 502 || errorCode === 'studio_ai_upstream_error') {
+    return {
+      type: 'service_unavailable',
+      message: 'The assistant encountered an upstream error; the dashboard still works',
     };
   }
   if (rawError instanceof Error && rawError.name === 'AbortError') {
@@ -69,9 +88,10 @@ export function parseAiError(
 export function mapAiError(
   status: number | null | undefined,
   retryAfter?: number | string | null,
-  rawError?: unknown
+  rawError?: unknown,
+  errorCode?: string | null
 ): string {
-  return parseAiError(status, retryAfter, rawError).message;
+  return parseAiError(status, retryAfter, rawError, errorCode).message;
 }
 
 export interface AssistantChatMessage {
@@ -172,8 +192,13 @@ export class StudioLlmAdapter implements AgLlmAdapter {
             if (response.status === 429) {
               retryAfter = response.headers.get('Retry-After');
             }
+            let errorCode: string | null = null;
+            try {
+              const bodyJson = await response.json();
+              errorCode = bodyJson?.error || bodyJson?.code || null;
+            } catch (_) {}
 
-            const friendlyMessage = mapAiError(response.status, retryAfter);
+            const friendlyMessage = mapAiError(response.status, retryAfter, null, errorCode);
             const errId = `err_${Date.now()}`;
 
             yield {

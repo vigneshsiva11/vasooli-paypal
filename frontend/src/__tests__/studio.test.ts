@@ -167,6 +167,21 @@ describe('AG Studio Assistant & Adapter Error Mapping', () => {
 
   it('maps 503 status to required friendly message', () => {
     expect(mapAiError(503)).toBe('The assistant is switched off or busy; the dashboard still works');
+    expect(mapAiError(503, null, null, 'studio_ai_disabled')).toBe(
+      'The assistant is switched off; the dashboard still works'
+    );
+    expect(mapAiError(503, null, null, 'studio_ai_busy')).toBe(
+      'The assistant is busy; the dashboard still works'
+    );
+  });
+
+  it('maps 502 status or upstream error code to friendly message', () => {
+    expect(mapAiError(502)).toBe(
+      'The assistant encountered an upstream error; the dashboard still works'
+    );
+    expect(mapAiError(502, null, null, 'studio_ai_upstream_error')).toBe(
+      'The assistant encountered an upstream error; the dashboard still works'
+    );
   });
 
   it('maps network errors to friendly message', () => {
@@ -286,6 +301,24 @@ describe('AG Studio Assistant & Adapter Error Mapping', () => {
     expect(serviceUnavailable.type).toBe('service_unavailable');
     expect(serviceUnavailable.message).toBe(
       'The assistant is switched off or busy; the dashboard still works'
+    );
+
+    const disabledError = parseAiError(503, null, null, 'studio_ai_disabled');
+    expect(disabledError.type).toBe('service_unavailable');
+    expect(disabledError.message).toBe(
+      'The assistant is switched off; the dashboard still works'
+    );
+
+    const busyError = parseAiError(503, null, null, 'studio_ai_busy');
+    expect(busyError.type).toBe('service_unavailable');
+    expect(busyError.message).toBe(
+      'The assistant is busy; the dashboard still works'
+    );
+
+    const upstreamError = parseAiError(502, null, null, 'studio_ai_upstream_error');
+    expect(upstreamError.type).toBe('service_unavailable');
+    expect(upstreamError.message).toBe(
+      'The assistant encountered an upstream error; the dashboard still works'
     );
 
     const networkError = parseAiError(null, null, new Error('Failed to fetch'));

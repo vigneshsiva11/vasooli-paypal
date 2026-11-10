@@ -1,342 +1,158 @@
-<div align="center">
-
-<img src="https://media.giphy.com/media/qgQUggAC3Pfv687qPC/giphy.gif" width="300" alt="Coding GIF" />
-
-### 👋 Hey there, I'm
-
-# **Prince R**
-
-<img src="https://readme-typing-svg.demolab.com?font=Fira+Code&pause=1000&color=7C3AED&center=true&vCenter=true&multiline=true&repeat=true&width=500&height=100&lines=Student+Developer;Full-Stack+Enthusiast" alt="Typing SVG" />
-
-<br/>
-
-![Profile Views](https://komarev.com/ghpvc/?username=princekumar-dev&color=7C3AED&style=for-the-badge&label=PROFILE+VIEWS)
-![GitHub followers](https://img.shields.io/github/followers/princekumar-dev?color=7c3aed&style=for-the-badge&label=FOLLOWERS)
-![GitHub stars](https://img.shields.io/github/stars/princekumar-dev?color=fbbf24&style=for-the-badge&label=STARS)
-![Open to work](https://img.shields.io/badge/🟢_OPEN_TO_WORK-00C853?style=for-the-badge&labelColor=000000)
-
-<br/>
-
-[![LinkedIn](https://img.shields.io/badge/LinkedIn-0A66C2?style=for-the-badge&logo=linkedin&logoColor=white)](https://www.linkedin.com/in/prince-r-b9685130b/)
-[![Instagram](https://img.shields.io/badge/Instagram-E4405F?style=for-the-badge&logo=instagram&logoColor=white)](https://www.instagram.com/prince_r_94)
-[![Email](https://img.shields.io/badge/Email-D14836?style=for-the-badge&logo=gmail&logoColor=white)](mailto:prince55833kumar@gmail.com)
-[![Portfolio](https://img.shields.io/badge/Portfolio-000000?style=for-the-badge&logo=about-dot-me&logoColor=white)](https://my-portfolio-077.vercel.app/)
-[![Buy Me A Coffee](https://img.shields.io/badge/Buy_Me_A_Coffee-FFDD00?style=for-the-badge&logo=buy-me-a-coffee&logoColor=black)](https://www.buymeacoffee.com/princekumar-dev)
-[![GitHub Sponsors](https://img.shields.io/badge/GitHub_Sponsors-EA4AAA?style=for-the-badge&logo=githubsponsors&logoColor=white)](https://github.com/sponsors/princekumar-dev)
-
-<br/>
-
-</div>
-
----
-
-## 🧑 **About Me**
-
-<table>
-<tr>
-<td width="50%">
-
-🎯 **Current Focus**
-- 🔭 Building **full-stack web applications**
-- 🌱 Currently learning **System Design & Cloud Architecture**
-- 💡 Exploring **AI/ML** integration in web apps
-- 🎯 Goal: Build impactful products that solve real problems
-
-</td>
-<td width="50%">
-
-⚡ **Quick Facts**
-- 🎓 Student developer passionate about **crafting impactful software**
-- 💻 Tech Stack: **Python, JavaScript, TypeScript, React, Node.js, Flask**
-- 🏆 **Hackathon participant** & open-source contributor
-- 📫 Reach me on [LinkedIn](https://www.linkedin.com/in/prince-r-b9685130b/) or [Email](mailto:prince55833kumar@gmail.com)
-
-</td>
-</tr>
-</table>
-
-> 💬 *"Ask me about Web Development, Python Scripting, or anything tech!"*
-
----
-
-## ⚡ **What I Build**
-
-<table>
-<tr>
-<td align="center" width="33%">
-
-🌐 **Full-Stack Apps
-
-</td>
-<td align="center" width="33%">
-
-🤖 **AI-Powered Tools
-
-</td>
-<td align="center" width="33%">
-
-📊 **Data Dashboards
-
-</td>
-</tr>
-<tr>
-<td align="center" width="33%">
-
-REST APIs & CRUD
-
-</td>
-<td align="center" width="33%">
-
-ML Model Integration
-
-</td>
-<td align="center" width="33%">
-
-Real-Time Analytics
-
-</td>
-</tr>
-</table>
-
----
-
-## 🛠️ **Tech Stack**
-
-<table>
-<tr>
-<td align="center" width="96">
-<img src="https://cdn.jsdelivr.net/gh/devicons/devicon/icons/python/python-original.svg" width="48" height="48" alt="Python" />
-<br>
-<strong>Python</strong>
-</td>
-<td align="center" width="96">
-<img src="https://cdn.jsdelivr.net/gh/devicons/devicon/icons/javascript/javascript-original.svg" width="48" height="48" alt="JavaScript" />
-<br>
-<strong>JavaScript</strong>
-</td>
-<td align="center" width="96">
-<img src="https://cdn.jsdelivr.net/gh/devicons/devicon/icons/typescript/typescript-original.svg" width="48" height="48" alt="TypeScript" />
-<br>
-<strong>TypeScript</strong>
-</td>
-<td align="center" width="96">
-<img src="https://cdn.jsdelivr.net/gh/devicons/devicon/icons/java/java-original.svg" width="48" height="48" alt="Java" />
-<br>
-<strong>Java</strong>
-</td>
-<td align="center" width="96">
-<img src="https://cdn.jsdelivr.net/gh/devicons/devicon/icons/html5/html5-original.svg" width="48" height="48" alt="HTML5" />
-<br>
-<strong>HTML5</strong>
-</td>
-<td align="center" width="96">
-<img src="https://cdn.jsdelivr.net/gh/devicons/devicon/icons/css3/css3-original.svg" width="48" height="48" alt="CSS3" />
-<br>
-<strong>CSS3</strong>
-</td>
-</tr>
-<tr>
-<td align="center" width="96">
-<img src="https://cdn.jsdelivr.net/gh/devicons/devicon/icons/react/react-original.svg" width="48" height="48" alt="React" />
-<br>
-<strong>React</strong>
-</td>
-<td align="center" width="96">
-<img src="https://cdn.jsdelivr.net/gh/devicons/devicon/icons/nextjs/nextjs-original.svg" width="48" height="48" alt="Next.js" />
-<br>
-<strong>Next.js</strong>
-</td>
-<td align="center" width="96">
-<img src="https://cdn.jsdelivr.net/gh/devicons/devicon/icons/nodejs/nodejs-original.svg" width="48" height="48" alt="Node.js" />
-<br>
-<strong>Node.js</strong>
-</td>
-<td align="center" width="96">
-<img src="https://cdn.jsdelivr.net/gh/devicons/devicon/icons/flask/flask-original.svg" width="48" height="48" alt="Flask" />
-<br>
-<strong>Flask</strong>
-</td>
-<td align="center" width="96">
-<img src="https://cdn.jsdelivr.net/gh/devicons/devicon/icons/tailwindcss/tailwindcss-original.svg" width="48" height="48" alt="Tailwind" />
-<br>
-<strong>Tailwind</strong>
-</td>
-<td align="center" width="96">
-<img src="https://cdn.jsdelivr.net/gh/devicons/devicon/icons/mongodb/mongodb-original.svg" width="48" height="48" alt="MongoDB" />
-<br>
-<strong>MongoDB</strong>
-</td>
-</tr>
-<tr>
-<td align="center" width="96">
-<img src="https://cdn.jsdelivr.net/gh/devicons/devicon/icons/mysql/mysql-original.svg" width="48" height="48" alt="MySQL" />
-<br>
-<strong>MySQL</strong>
-</td>
-<td align="center" width="96">
-<img src="https://cdn.jsdelivr.net/gh/devicons/devicon/icons/git/git-original.svg" width="48" height="48" alt="Git" />
-<br>
-<strong>Git</strong>
-</td>
-<td align="center" width="96">
-<img src="https://cdn.jsdelivr.net/gh/devicons/devicon/icons/github/github-original.svg" width="48" height="48" alt="GitHub" />
-<br>
-<strong>GitHub</strong>
-</td>
-<td align="center" width="96">
-<img src="https://cdn.jsdelivr.net/gh/devicons/devicon/icons/vscode/vscode-original.svg" width="48" height="48" alt="VS Code" />
-<br>
-<strong>VS Code</strong>
-</td>
-<td align="center" width="96">
-<img src="https://cdn.jsdelivr.net/gh/devicons/devicon/icons/linux/linux-original.svg" width="48" height="48" alt="Linux" />
-<br>
-<strong>Linux</strong>
-</td>
-<td align="center" width="96">
-<img src="https://cdn.jsdelivr.net/gh/devicons/devicon/icons/figma/figma-original.svg" width="48" height="48" alt="Figma" />
-<br>
-<strong>Figma</strong>
-</td>
-</tr>
-</table>
-
----
-
-## 📊 **GitHub Stats**
-
-<table>
-<tr>
-<td width="50%">
-<img src="https://github-readme-stats.vercel.app/api?username=princekumar-dev&show_icons=true&theme=radical&count_private=true&hide_border=true" alt="GitHub Stats" width="100%" />
-</td>
-<td width="50%">
-<img src="https://github-readme-stats.vercel.app/api/top-langs/?username=princekumar-dev&layout=compact&theme=radical&hide_border=true" alt="Top Languages" width="100%" />
-</td>
-</tr>
-</table>
-
-<p align="center">
-<img src="https://github-readme-streak-stats.herokuapp.com/?user=princekumar-dev&theme=radical&hide_border=true" alt="GitHub Streak" />
-</p>
-
-<p align="center">
-<img src="https://github-readme-activity-graph.vercel.app/graph?username=princekumar-dev&theme=react-dark&hide_border=true" alt="Contributions Graph" width="100%" />
-</p>
-
-<p align="center">
-<img src="https://github-profile-trophy.vercel.app/?username=princekumar-dev&theme=radical&no-frame=true&no-bg=true&column=7" alt="GitHub Trophies" width="100%" />
-</p>
-
----
-
-## 🚀 **Featured Projects**
-
-<table>
-<tr>
-<td width="50%">
-
-### 📚 Smart Classroom & TimeTable Scheduler
-
-An intelligent system to automate classroom and timetable management using constraint-based optimization.
-
-`TypeScript` `React` `Node.js`
-
-[![View Project](https://img.shields.io/badge/VIEW_PROJECT-7C3AED?style=for-the-badge)](https://github.com/princekumar-dev/Smart_Classroom_And_TimeTable_Scheduler)
-
-</td>
-<td width="50%">
-
-### 🚚 LogiPilot AI
-
-AI-powered logistics platform that predicts shipment delays, optimizes delivery routes, and monitors fleets in real-time.
-
-`TypeScript` `AI/ML` `Real-Time`
-
-[![View Project](https://img.shields.io/badge/VIEW_PROJECT-3B82F6?style=for-the-badge)](https://github.com/princekumar-dev/Logipilot)
-
-</td>
-</tr>
-<tr>
-<td width="50%">
-
-### ⚡ EnergySage
-
-AI-powered platform for monitoring, forecasting, and optimizing energy use for households and industries.
-
-`TypeScript` `AI` `Data Viz`
-
-[![View Project](https://img.shields.io/badge/VIEW_PROJECT-10B981?style=for-the-badge)](https://github.com/princekumar-dev/EnergySage)
-
-</td>
-<td width="50%">
-
-### 🧮 GPA Calculator
-
-A sleek, web-based GPA Calculator built with Flask — real-time accuracy, responsive UI, and robust error handling.
-
-`JavaScript` `Flask` `Python`
-
-[![View Project](https://img.shields.io/badge/VIEW_PROJECT-F59E0B?style=for-the-badge)](https://github.com/princekumar-dev/GPA---Calculator-)
-
-</td>
-</tr>
-<tr>
-<td width="50%">
-
-### 🎬 Netflix Homepage Clone
-
-A clean, visually striking static clone of the Netflix homepage with responsive design.
-
-`HTML` `CSS` `Responsive`
-
-[![View Project](https://img.shields.io/badge/VIEW_PROJECT-EF4444?style=for-the-badge)](https://github.com/princekumar-dev/Netfly---Homepage-Clone-Of-NETFLIX)
-
-</td>
-<td width="50%">
-
-### 🏛️ MSEC Connect
-
-Full-stack venue booking platform for seminar halls and auditoriums at MSEC.
-
-`JavaScript` `Full-Stack` `Booking`
-
-[![View Project](https://img.shields.io/badge/VIEW_PROJECT-06B6D4?style=for-the-badge)](https://github.com/princekumar-dev/Connect)
-
-</td>
-</tr>
-</table>
-
----
-
-## 🏆 **Achievements**
-
-<p align="center">
-<a href="https://github.com/princekumar-dev">
-<img src="https://github.githubassets.com/assets/quickdraw-default-39c6aec8ff89.png" width="100" alt="Quickdraw" />
-<img src="https://github.githubassets.com/assets/pull-shark-default-498c279a747d.png" width="100" alt="Pull Shark" />
-<img src="https://github.githubassets.com/assets/pair-extraordinaire-default-579438a20e01.png" width="100" alt="Pair Extraordinaire" />
-</a>
-</p>
-
----
-
-## 💡 **Daily Motivation**
-
-![Motivational Quote](https://quotes-github-readme.vercel.app/api?type=horizontal&theme=tokyonight)
-
----
-
-## 📫 **Let's Connect**
-
-[![LinkedIn](https://img.shields.io/badge/LinkedIn-0A66C2?style=for-the-badge&logo=linkedin&logoColor=white)](https://www.linkedin.com/in/prince-r-b9685130b/)
-[![Instagram](https://img.shields.io/badge/Instagram-E4405F?style=for-the-badge&logo=instagram&logoColor=white)](https://www.instagram.com/prince_r_94)
-[![GitHub](https://img.shields.io/badge/GitHub-181717?style=for-the-badge&logo=github&logoColor=white)](https://github.com/princekumar-dev)
-[![Email](https://img.shields.io/badge/Email-D14836?style=for-the-badge&logo=gmail&logoColor=white)](mailto:prince55833kumar@gmail.com)
-[![Buy Me A Coffee](https://img.shields.io/badge/Buy_Me_A_Coffee-FFDD00?style=for-the-badge&logo=buy-me-a-coffee&logoColor=black)](https://www.buymeacoffee.com/princekumar-dev)
-
-<br/>
-
-![Thanks](https://img.shields.io/badge/⭐_Thanks_for_visiting!-7C3AED?style=for-the-badge&labelColor=000000)
-
-**Built with ❤️ by [Prince R](https://github.com/princekumar-dev)**
+# Vasooli: a money-recovery agent that earns your trust
+
+**Autonomy you can audit.** Vasooli recovers failed payments on PayPal, but it never acts on its own say-so: every action passes a deterministic policy layer, every recovery is confirmed by a signed PayPal webhook, and every decision can be re-derived later from a fingerprinted rulebook.
+
+- **Live demo:** https://vasooli-paypal.onrender.com (sandbox, no login)
+- **Video (under 3 min):** `<YOUTUBE URL>`
+- **Devpost:** `<DEVPOST URL>`
+- **What changed since the first version:** [WHAT_CHANGED.md](WHAT_CHANGED.md)
+
+> Everything here runs against the **PayPal sandbox**. No real money moves.
+
+## The idea in three acts
+
+| Act | What you see | Where |
+|---|---|---|
+| **1. Say the rules** | A merchant types policy in plain English ("contact at most twice, wait 48 hours, ask me before anything over $100"). Gemini proposes structured values; deterministic code validates them against hard caps, shows a diff and a new fingerprint; only an admin can apply them. | `/rules` |
+| **2. Watch it work** | A card on file is declined (a PayPal sandbox simulation). Vasooli reads the real decline code, diagnoses it, passes policy, retries the vaulted card through the PayPal API, and a **signed PayPal webhook** marks the money recovered. | `/live` |
+| **3. Try to break it** | Outside AI agents reach Vasooli through a REST page and an MCP server. Seven scripted attacks (retry a do-not-retry decline, contact an opted-out customer, spend $1,500 unapproved, call "apply rules"...) are evaluated by the real policy layer and **blocked**, each one audited. | `/agent`, `/mcp` |
+
+## What is real and what is simulated
+
+| Real | Simulated or labelled |
+|---|---|
+| PayPal sandbox API calls (Orders v2, vault, invoicing), signed webhooks, the vaulted retry, the captured payment events | The initial decline is produced with PayPal's sandbox trigger (code 5120); sandbox money |
+| Deterministic diagnosis, decision, policy, and verification code | The time-skip between decline and retry uses a **simulated clock**, labelled wherever it appears |
+| Every figure on the dashboards (computed from the ledger) | "Replay" pages play back a **real saved run** with the waiting time compressed |
+| Hard caps on rules, enforced in code | Attack scenarios run in dry-run on in-memory events and write nothing |
+
+Sandbox webhooks take about a minute each, so a live run takes several minutes. No statistics in this project are invented.
+
+## Try it in two minutes
+1. **Mission Control** (`/live`): play the replay of a real run, or press **Run it live** (rate limited; sandbox only). The hero card shows "Verified by PayPal webhook" only when the ledger row is gateway-verified.
+2. **Rules** (`/rules`): click an example chip. Note the parsed values with their source phrases, the hard-cap result, and the fingerprint. The injection example is refused.
+3. **Try to break it** (`/agent`): click each scenario and watch the audit feed.
+4. **Ledger** (`/ledger`): Verified versus Asserted badges; the "Needs approval" filter shows verdicts that route to a human.
+5. **Studio** (`/studio`): an AG Studio dashboard over the sanitized ledger, with a read-only assistant that answers only from ledger queries.
+
+## Screenshots
+
+| View | Screenshot |
+|---|---|
+| **Mission Control (`/live`)**<br/>Replay finished with verified PayPal webhook and recovery steps | ![Mission Control](docs/screenshots/01-mission-control.png) |
+| **Why Card (`/live`)**<br/>Diagnostic & decision explanations with policy verification | ![Why Card](docs/screenshots/02-why-card.png) |
+| **Rules Configuration (`/rules`)**<br/>Plain-English proposals, deterministic caps, diff & fingerprint | ![Rules & Policy](docs/screenshots/03-rules.png) |
+| **Adversarial Testing (`/agent`)**<br/>Seven attack scenarios blocked by deterministic guardrails | ![Try to break it](docs/screenshots/04-agent.png) |
+| **Ledger (`/ledger`)**<br/>Verified vs Asserted badges and recovery status audit | ![Ledger](docs/screenshots/05-ledger.png) |
+| **Audit Trail (`/audit-trail`)**<br/>Full timeline and state history for the latest recovery event | ![Audit Trail](docs/screenshots/06-audit-trail.png) |
+| **Studio (`/studio`)**<br/>AG Studio KPI cards, root cause chart, and read-only assistant | ![Studio](docs/screenshots/07-studio.png) |
+
+## How it works
+
+```mermaid
+flowchart LR
+  PP["PayPal sandbox<br/>Orders v2 · Vault · Invoicing"] -- signed webhooks --> WH["/webhooks/paypal<br/>signature verified, stored once"]
+  WH --> ING[Ingestion] --> DIA["Diagnosis<br/>rules, Gemini only for unmapped codes"]
+  DIA --> DEC["Decision<br/>expected recovery value"] --> POL{"Policy<br/>rulebook, six checks"}
+  POL -- "AuthorizedVerdict only" --> EXE["Execution port<br/>PayPal adapter"]
+  EXE -- vaulted retry --> PP
+  PP -- "PAYMENT.CAPTURE.COMPLETED" --> REC["Reconciler<br/>verified vs asserted"] --> LED[("Ledger and metrics")]
+  ORC["Orchestrator<br/>+ simulated clock"] -. drives .-> DIA
+```
+
+More diagrams and the trust boundaries: [docs/architecture.md](docs/architecture.md). Detailed design notes: [ARCHITECTURE.md](ARCHITECTURE.md).
+
+Key design rules:
+- **The model proposes, deterministic code disposes.** The LLM never writes customer messages and never authorizes anything. A structural `AuthorizedVerdict` type is the only way to reach execution.
+- **Verified and asserted money are never blended.** A webhook-confirmed PayPal payment is `gateway_verified`; a payment recorded externally is `merchant_asserted`.
+- **Re-derivable decisions.** Every verdict is stamped with a rulebook fingerprint (`rb1_...`); old rulebooks stay resolvable, so history can be re-checked exactly. The INR fingerprint has never changed.
+- **A loop guard.** A declined recovery attempt is recorded against the original event and never creates new revenue at risk.
+
+## PayPal APIs used
+- **Orders v2:** card capture, `store_in_vault`, and server-side retries against a vaulted payment token (`vault_id`).
+- **Vault / payment tokens:** `VAULT.PAYMENT-TOKEN.CREATED` links a card on file to a customer.
+- **Webhooks:** `verify-webhook-signature` on every event; events stored once (unique event id); decline and completion events drive ingestion and verification.
+- **Invoicing v2:** invoice creation and send, partial-payment settings, and recorded (external) payments, used to prove that PayPal-collected and externally recorded payments can be told apart.
+
+## Where AI is used (Gemini)
+- **Diagnosis fallback:** only for decline codes the rules do not map.
+- **Plain-English rules compiler:** structured JSON output, temperature 0, the merchant's text treated as untrusted data, every value checked against hard caps and against its own source phrase; Gemini outages retry once and then fall back to a second model; example rules are cached.
+- **Studio assistant (optional):** read-only analysis of the sanitized ledger; every figure must come from a ledger query; behind a kill switch and rate limits; no API key in the browser.
+- **Promise-to-pay extraction:** free text to a validated commitment (live extraction is disabled on the public demo).
+
+## Safety and security
+- A guard allows only one public write route for runs (rate limited, sandbox only) and previews; every other write needs an admin token. Production **refuses to start** without the guard and an admin token.
+- Public responses are sanitized: no vault ids, emails, card data, payer ids, or raw payloads.
+- The MCP gateway exposes exactly **8 allowlisted tools** behind a bearer token. There is no tool for applying rules, resetting data, moving the clock, or making raw PayPal calls. Unknown tools are refused and audited.
+- Atomic locks and rate limits are proven on a real MongoDB, not mocks.
+
+## Tech stack
+**Backend:** Python 3.12, FastAPI, Motor (MongoDB Atlas), Pydantic, `google-genai`, `httpx`, MCP SDK.
+**Frontend:** React 19, Vite, TypeScript, Tailwind 4, TanStack Query, AG Grid Community 36.2.0, AG Studio 3.0.0, Vitest.
+**Hosting:** Render (web service and static site), MongoDB Atlas.
+
+## Sponsor tools
+- **Render:** hosts the API and the static site.
+- **AG Grid:** the Ledger and Audit Trail grids (AG Grid Community) and the Studio dashboard (AG Studio).
+- **APIMatic:** the ContextMatic MCP server was used inside the coding agent to look up PayPal endpoints; see [docs/apimatic.md](docs/apimatic.md) for exactly how.
+
+## Run it yourself
+
+**Prerequisites:** Python 3.12, Node 22, a MongoDB Atlas (or local) database, a Gemini API key, and a PayPal sandbox app with Expanded Checkout, Vault, and Invoicing enabled.
+
+```bash
+# Backend
+python3.12 -m venv .venv            # Windows: py -3.12 -m venv .venv
+.venv/bin/pip install -r requirements.txt   # Windows: .\.venv\Scripts\python.exe -m pip install -r requirements.txt
+cp .env.example .env                # fill in the values below; never commit .env
+.venv/bin/python -m uvicorn app.main:app --port 8124
+
+# Frontend (second terminal)
+cd frontend && npm ci && npm run dev    # http://localhost:5173
+```
+
+Explore with sample data (no PayPal needed): seed a **separate** database and start the API against it.
+```bash
+MONGODB_DB_NAME=vasooli_regress .venv/bin/python scripts/s3_seed.py http://127.0.0.1:8124
+MONGODB_DB_NAME=vasooli_regress .venv/bin/python scripts/s4_seed.py http://127.0.0.1:8124
+```
+
+Run the real PayPal flow: put the API behind a public HTTPS URL (a tunnel is fine), register `https://<your-url>/webhooks/paypal` as a webhook on your sandbox app (all events), set `PAYPAL_WEBHOOK_ID`, then run:
+```bash
+VASOOLI_ADMIN_TOKEN=<your admin token> .venv/bin/python scripts/p1_run_scenario.py --base https://<your-url> --customer demo-001 --amount 49
+```
+
+| Backend variable | Purpose |
+|---|---|
+| `MONGODB_URI`, `MONGODB_DB_NAME` | Database |
+| `GEMINI_API_KEY` | Rules compiler, diagnosis fallback |
+| `PAYPAL_ENV=sandbox`, `PAYPAL_CLIENT_ID`, `PAYPAL_CLIENT_SECRET`, `PAYPAL_WEBHOOK_ID` | PayPal sandbox |
+| `DEFAULT_CURRENCY=USD` | Metrics currency |
+| `PUBLIC_DEMO`, `ADMIN_TOKEN` | Write guard (required in production) |
+| `CORS_ORIGINS` | Allowed frontend origin(s) |
+| `PUBLIC_RUNS` | Enables the public "Run it live" route |
+| `AGENT_TOKEN` | Bearer token for `/mcp` |
+| `STUDIO_AI_ENABLED` | Studio assistant kill switch (off by default) |
+
+Frontend: `VITE_API_BASE_URL`, `VITE_DEFAULT_CURRENCY`, `VITE_STUDIO_AI`, `VITE_AG_STUDIO_LICENSE_KEY`.
+
+## Tests
+Run against a **regression** database only (never your live one):
+```bash
+python scripts/p1_contract_checks.py                 # 190+ offline checks
+python -m scripts.s10_validation_suite               # 41 adversarial and boundary checks
+MONGODB_DB_NAME=vasooli_regress python scripts/p1_integration_reconciler.py   # real MongoDB checks
+cd frontend && npm run test && npm run build         # frontend tests and build
+```
+Gates that call the original gateway's live API are held back to protect its quota. Counts change as the project grows.
+
+## Limitations (honest ones)
+- Sandbox only. The USD rulebook is the active profile; the original INR profile is frozen and kept for history.
+- Free-tier hosting sleeps, so the first request can be slow. Sandbox webhooks take about a minute. Gemini occasionally returns "high demand" errors; example rules and cached results keep the main paths working.
+- The learning loop and counter-offer features that were designed are not built.
+
+## Project history
+Vasooli began as an entry for another hackathon on a different payments gateway (Razorpay). That repository is frozen at the `razorpay-buildathon-submission` tag. This repository keeps the original pipeline and adds the PayPal integration, the orchestrator and simulated clock, the plain-English rules compiler, the agent gateway, and the frontend. Everything added after Oct 1, 2026 is listed in [WHAT_CHANGED.md](WHAT_CHANGED.md).
+
+## License
+MIT. See [LICENSE](LICENSE).

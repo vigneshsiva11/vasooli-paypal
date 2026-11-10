@@ -30,7 +30,11 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from app.config import get_settings
 from app.gateway.studio_limits import check_and_record_studio_attempt, extract_client_key
-from app.gateway.studio_schemas import BUNDLED_STUDIO_TOOLS, validate_studio_tools
+from app.gateway.studio_schemas import (
+    BUNDLED_STUDIO_TOOLS,
+    sanitize_tools_for_gemini,
+    validate_studio_tools,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -125,12 +129,14 @@ def compute_cache_key(
     system_prompt: str,
     conversation_input: Any,
     tools: Any,
+    tool_choice: Any = None,
 ) -> str:
     """Compute deterministic SHA256 cache key for an AI turn."""
     raw = (
         f"{model}:{system_prompt}:"
         f"{json.dumps(conversation_input, sort_keys=True)}:"
-        f"{json.dumps(tools, sort_keys=True)}"
+        f"{json.dumps(tools, sort_keys=True)}:"
+        f"{json.dumps(tool_choice, sort_keys=True)}"
     )
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
@@ -227,6 +233,54 @@ def translate_gemini_response_to_events(response: Any, message_id: str = "msg_1"
     return events
 
 
+def classify_gemini_error(exc: Exception) -> tuple[int, str]:
+    """Classify a Gemini failure into HTTP status and error string.
+
+    Returns:
+        (503, "studio_ai_busy") for 429/500/503/timeouts after retry and fallback.
+        (502, "studio_ai_upstream_error") for any other Gemini failure.
+    """
+    if isinstance(exc, (asyncio.TimeoutError, TimeoutError)):
+        return 503, "studio_ai_busy"
+
+    err_type = type(exc).__name__
+    err_str = str(exc).lower()
+
+    if "timeout" in err_str or "timed out" in err_str or "deadline" in err_str:
+        return 503, "studio_ai_busy"
+
+    status_code = getattr(exc, "code", None) or getattr(exc, "status_code", None)
+    if isinstance(status_code, int):
+        if status_code in (429, 500, 502, 503, 504):
+            return 503, "studio_ai_busy"
+        return 502, "studio_ai_upstream_error"
+
+    if any(k in err_str or k in err_type.lower() for k in ("429", "500", "503", "504", "resourceexhausted", "unavailable")):
+        return 503, "studio_ai_busy"
+
+    return 502, "studio_ai_upstream_error"
+
+
+def is_non_retryable_client_error(exc: Exception) -> tuple[bool, int, str]:
+    """Determine if an exception represents a non-retryable 4xx client error from Gemini.
+
+    Returns:
+        (is_client_error: bool, status_code: int, error_type: str)
+    """
+    err_type = type(exc).__name__
+    status_code = getattr(exc, "code", None) or getattr(exc, "status_code", None)
+    if isinstance(status_code, int) and 400 <= status_code < 500 and status_code != 429:
+        return True, status_code, err_type
+
+    if err_type == "ClientError":
+        code = getattr(exc, "code", 400)
+        if isinstance(code, int) and code != 429:
+            return True, code, err_type
+        return True, 400, err_type
+
+    return False, 500, err_type
+
+
 async def call_gemini_with_fallback(
     model_name: str,
     contents: Any,
@@ -240,7 +294,8 @@ async def call_gemini_with_fallback(
     1. Primary model (e.g. gemini-3.6-flash)
     2. Primary model retry
     3. Fallback model (e.g. gemini-3.5-flash-lite)
-    Raises RuntimeError on final failure without leaking keys.
+    Raises original exception on final failure without leaking keys.
+    Non-retryable 4xx errors are raised immediately without retries.
     """
     settings = get_settings()
     primary_model = settings.gemini_model
@@ -283,8 +338,13 @@ async def call_gemini_with_fallback(
                 m_name,
                 err_type,
             )
+            is_client_err, _, _ = is_non_retryable_client_error(exc)
+            if is_client_err:
+                raise exc
 
-    raise RuntimeError(f"Gemini call exhausted all attempts: {type(last_error).__name__}")
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("Gemini call exhausted all attempts")
 
 
 @router.options("/ai/studio")
@@ -304,7 +364,11 @@ async def studio_ai_proxy(request: Request) -> Response:
         return JSONResponse(
             status_code=503,
             headers=CORS_HEADERS,
-            content={"detail": "Studio AI assistant is disabled.", "code": "studio_ai_disabled"},
+            content={
+                "error": "studio_ai_disabled",
+                "code": "studio_ai_disabled",
+                "detail": "Studio AI assistant is disabled.",
+            },
         )
 
     # 2. Body cap: 413 over max body size (32 KB)
@@ -387,6 +451,7 @@ async def studio_ai_proxy(request: Request) -> Response:
     # 7. Server system prompt (server IGNORES any client-supplied "instructions")
     system_prompt = STUDIO_AI_SYSTEM_PROMPT
     conversation_input = body.get("input", [])
+    raw_tool_choice = body.get("toolChoice") or body.get("tool_choice")
 
     # 8. Response cache check (keyed by hash with TTL)
     cache_key = compute_cache_key(
@@ -394,6 +459,7 @@ async def studio_ai_proxy(request: Request) -> Response:
         system_prompt=system_prompt,
         conversation_input=conversation_input,
         tools=client_tools,
+        tool_choice=raw_tool_choice,
     )
     now_epoch = time.time()
     ttl = settings.studio_ai_cache_ttl_seconds
@@ -429,7 +495,20 @@ async def studio_ai_proxy(request: Request) -> Response:
     if isinstance(conversation_input, list):
         for item in conversation_input:
             if isinstance(item, dict):
-                content_str = item.get("content") or item.get("text") or ""
+                raw_c = item.get("content") or item.get("text") or ""
+                if isinstance(raw_c, list):
+                    parts = []
+                    for p in raw_c:
+                        if isinstance(p, dict):
+                            parts.append(p.get("text") or p.get("content") or "")
+                        elif isinstance(p, str):
+                            parts.append(p)
+                    content_str = " ".join(filter(None, parts))
+                elif isinstance(raw_c, dict):
+                    content_str = raw_c.get("text") or raw_c.get("content") or ""
+                else:
+                    content_str = str(raw_c) if raw_c else ""
+
                 role = item.get("role", "user")
                 if content_str:
                     contents.append(f"{role}: {content_str}")
@@ -446,30 +525,86 @@ async def studio_ai_proxy(request: Request) -> Response:
         else:
             contents.append(f"user: {schema_instruction}")
 
-    # Build Gemini config with server's system prompt, temperature=0, token cap, and tool_choice auto
+    # Build tools declaration and ensure OpenAPI compliance (items on array schemas)
+    tools_decl = client_tools if client_tools is not None else list(BUNDLED_STUDIO_TOOLS.values())
+    if tools_decl:
+        tools_decl = sanitize_tools_for_gemini(tools_decl)
+
+    raw_tool_choice = body.get("toolChoice") or body.get("tool_choice")
+
+    # Build Gemini config with server's system prompt, temperature=0, token cap, and tool_choice
     gemini_client = getattr(request.app.state, "gemini_client", None)
     gemini_config = None
     try:
         from google.genai import types
-        tools_decl = client_tools if client_tools is not None else list(BUNDLED_STUDIO_TOOLS.values())
+
+        tool_config = None
+        if tools_decl:
+            mode = types.FunctionCallingConfigMode.AUTO
+            allowed_names = None
+            if raw_tool_choice == "none":
+                mode = types.FunctionCallingConfigMode.NONE
+            elif raw_tool_choice == "required":
+                mode = types.FunctionCallingConfigMode.ANY
+            elif isinstance(raw_tool_choice, dict):
+                mode = types.FunctionCallingConfigMode.ANY
+                fn = raw_tool_choice.get("name") or (
+                    raw_tool_choice.get("function", {}).get("name")
+                    if isinstance(raw_tool_choice.get("function"), dict)
+                    else None
+                )
+                if fn:
+                    allowed_names = [fn]
+            elif isinstance(raw_tool_choice, str) and raw_tool_choice not in ("auto", "none", "required"):
+                mode = types.FunctionCallingConfigMode.ANY
+                allowed_names = [raw_tool_choice]
+
+            fc_kwargs: dict[str, Any] = {"mode": mode}
+            if allowed_names:
+                fc_kwargs["allowed_function_names"] = allowed_names
+            tool_config = types.ToolConfig(
+                function_calling_config=types.FunctionCallingConfig(**fc_kwargs)
+            )
+
         gemini_config = types.GenerateContentConfig(
             system_instruction=system_prompt,
             temperature=0.0,
             max_output_tokens=settings.studio_ai_max_output_tokens,
-            tool_config=types.ToolConfig(
-                function_calling_config=types.FunctionCallingConfig(
-                    mode=types.FunctionCallingConfigMode.AUTO
-                )
-            ),
+            tool_config=tool_config,
             tools=[{"function_declarations": tools_decl}] if tools_decl else None,
         )
     except Exception:
+        mode_str = "AUTO"
+        allowed_names = None
+        if raw_tool_choice == "none":
+            mode_str = "NONE"
+        elif raw_tool_choice == "required":
+            mode_str = "ANY"
+        elif isinstance(raw_tool_choice, dict):
+            mode_str = "ANY"
+            fn = raw_tool_choice.get("name") or (
+                raw_tool_choice.get("function", {}).get("name")
+                if isinstance(raw_tool_choice.get("function"), dict)
+                else None
+            )
+            if fn:
+                allowed_names = [fn]
+        elif isinstance(raw_tool_choice, str) and raw_tool_choice not in ("auto", "none", "required"):
+            mode_str = "ANY"
+            allowed_names = [raw_tool_choice]
+
+        fc_dict: dict[str, Any] = {"mode": mode_str}
+        if allowed_names:
+            fc_dict["allowed_function_names"] = allowed_names
+
         gemini_config = {
             "system_instruction": system_prompt,
             "temperature": 0.0,
             "max_output_tokens": settings.studio_ai_max_output_tokens,
-            "tool_config": {"function_calling_config": {"mode": "AUTO"}},
         }
+        if tools_decl:
+            gemini_config["tools"] = [{"function_declarations": tools_decl}]
+            gemini_config["tool_config"] = {"function_calling_config": fc_dict}
 
     try:
         gemini_resp = await call_gemini_with_fallback(
@@ -480,20 +615,22 @@ async def studio_ai_proxy(request: Request) -> Response:
         )
     except Exception as exc:
         duration_ms = (time.monotonic() - start_time) * 1000
-        logger.warning(
-            "studio_ai_call: hash=%s length=%d model=%s duration_ms=%.1f status=503 error=%s",
-            cache_key[:16],
-            len(raw_body),
+        status_code, err_code = classify_gemini_error(exc)
+        err_type = type(exc).__name__
+
+        logger.error(
+            "studio_ai_call_failed: model=%s error_type=%s",
             chosen_model,
-            duration_ms,
-            type(exc).__name__,
+            err_type,
         )
+
         return JSONResponse(
-            status_code=503,
+            status_code=status_code,
             headers=CORS_HEADERS,
             content={
-                "detail": "Studio AI service is temporarily unavailable.",
-                "code": "gemini_unavailable",
+                "error": err_code,
+                "code": err_code,
+                "detail": f"Studio AI error: {err_code}",
             },
         )
 
