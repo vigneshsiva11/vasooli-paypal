@@ -3,7 +3,8 @@ import { useSearchParams, Link } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import { LayoutList, Table as TableIcon, AlertCircle, RefreshCw } from 'lucide-react';
 import type { components } from '@/api/schema';
-import { formatCurrency, formatLabel } from '@/utils/formatters';
+import { formatCurrency, formatLabel, formatActionLabel } from '@/utils/formatters';
+import { GatewayLink } from '@/components/GatewayLink';
 import { useAuditTrailQuery, useEventsQuery } from '../api/getAuditTrail';
 import { useLedgerQuery } from '@/features/ledger/api/getLedger';
 import { selectDefaultEventId, getAuditTrailErrorMessage } from '../utils/auditTrailUtils';
@@ -276,19 +277,11 @@ function TrailView({
                   <strong>
                     {formatLabel(item.intervention)} · {item.status}
                   </strong>{' '}
-                  · {item.action_type}
+                  · {formatActionLabel(item.action_type, item.gateway)}
                   {item.gateway_url && (
-                    <>
-                      {' · '}
-                      <a
-                        className="text-[var(--color-accent)] underline"
-                        href={item.gateway_url}
-                        rel="noreferrer"
-                        target="_blank"
-                      >
-                        Gateway link
-                      </a>
-                    </>
+                    <div className="mt-1">
+                      <GatewayLink url={item.gateway_url} gatewayRef={item.gateway_ref} />
+                    </div>
                   )}
                   {item.failure_reason && (
                     <p className="mt-1 text-[var(--color-status-blocked)]">Failure: {item.failure_reason}</p>

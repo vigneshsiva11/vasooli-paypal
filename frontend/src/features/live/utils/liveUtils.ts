@@ -85,7 +85,8 @@ export function extractEvidenceFromStepRefs(steps: any[] = []): EvidenceItem[] {
           key === 'policy_verdict_id' ||
           key === 'execution_id' ||
           key === 'verification_id' ||
-          key === 'gateway_ref';
+          key === 'gateway_ref' ||
+          key === 'gateway_url';
         if (isId) {
           const uniqueKey = `${key}:${val}`;
           if (!seen.has(uniqueKey)) {

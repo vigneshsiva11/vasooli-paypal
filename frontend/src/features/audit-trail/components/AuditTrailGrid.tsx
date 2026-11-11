@@ -4,7 +4,8 @@ import type { ColDef } from 'ag-grid-community';
 import { ModuleRegistry, AllCommunityModule } from 'ag-grid-community';
 import { appAgGridTheme } from '@/components/AgGridTheme';
 import type { AuditTrail } from '../api/getAuditTrail';
-import { formatCurrency, formatLabel } from '@/utils/formatters';
+import { formatCurrency, formatLabel, formatActionLabel, isRetryAction } from '@/utils/formatters';
+import { GatewayLink } from '@/components/GatewayLink';
 
 ModuleRegistry.registerModules([AllCommunityModule]);
 
@@ -15,6 +16,8 @@ export interface AuditTrailGridRow {
   source: string;
   time: string;
   detail: string;
+  gateway_url?: string | null;
+  gateway_ref?: string | null;
 }
 
 export function flattenAuditTrailToRows(data: AuditTrail): AuditTrailGridRow[] {
@@ -70,13 +73,18 @@ export function flattenAuditTrailToRows(data: AuditTrail): AuditTrailGridRow[] {
 
   // 5. Executions
   (data.executions || []).forEach((exec) => {
+    const actionLabel = formatActionLabel(exec.action_type, exec.gateway);
     rows.push({
       stage: '5-Execution',
-      action: formatLabel(exec.intervention),
+      action: isRetryAction(exec.intervention)
+        ? formatActionLabel(exec.intervention, exec.gateway)
+        : formatLabel(exec.intervention),
       verdictOrOutcome: exec.status,
       source: exec.gateway,
       time: exec.executed_at || '',
-      detail: `Action: ${exec.action_type} | Ref: ${exec.gateway_ref || (exec as any).razorpay_payment_link_id || 'None'}${exec.failure_reason ? ` | Failure: ${exec.failure_reason}` : ''}`,
+      detail: `Action: ${actionLabel} | Ref: ${exec.gateway_ref || (exec as any).razorpay_payment_link_id || 'None'}${exec.failure_reason ? ` | Failure: ${exec.failure_reason}` : ''}`,
+      gateway_url: exec.gateway_url,
+      gateway_ref: exec.gateway_ref,
     });
   });
 
@@ -139,7 +147,38 @@ export const AuditTrailGrid: React.FC<{ data: AuditTrail }> = ({ data }) => {
       },
       { field: 'source', headerName: 'Source', width: 160, filter: true, sortable: true },
       { field: 'time', headerName: 'Time', width: 180, filter: true, sortable: true },
-      { field: 'detail', headerName: 'Detail', flex: 1, minWidth: 260, filter: true, sortable: true },
+      {
+        field: 'detail',
+        headerName: 'Detail',
+        flex: 1,
+        minWidth: 260,
+        filter: true,
+        sortable: true,
+        cellRenderer: (params: any) => {
+          const row = params.data;
+          if (row?.gateway_url) {
+            return (
+              <div className="flex flex-wrap items-center gap-2 py-1">
+                <span>{params.value}</span>
+                <span className="text-gray-300">·</span>
+                <GatewayLink url={row.gateway_url} gatewayRef={row.gateway_ref} />
+              </div>
+            );
+          }
+          return params.value;
+        },
+      },
+      {
+        field: 'gateway_url',
+        headerName: 'Gateway Link',
+        width: 220,
+        filter: true,
+        sortable: true,
+        cellRenderer: (params: any) => {
+          if (!params.value) return <span className="text-gray-400">—</span>;
+          return <GatewayLink url={params.value} gatewayRef={params.data?.gateway_ref} />;
+        },
+      },
     ],
     []
   );

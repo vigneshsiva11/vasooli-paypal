@@ -1,5 +1,6 @@
 import type { RulePreviewResponse } from '@/features/rules/api/rulesApi';
 import type { ScenarioAttemptResponse } from '@/features/agent/api/agentApi';
+import { formatActionLabel } from '@/utils/formatters';
 
 export interface RunStep {
   name: string;
@@ -49,7 +50,10 @@ export function getReplayStepCaption(step: RunStep): string {
       return `Simulated clock advanced by ${hours} hours for cooldown.`;
     }
     case 'retry_executed':
-      return `Payment retry executed on gateway ref ${refs.gateway_ref || 'unknown'} with status ${refs.capture_status || 'unknown'} (processor response code ${refs.processor_response_code || 'unknown'}).`;
+    case 'retry_simulated': {
+      const actionLabel = formatActionLabel(step.name, step.source || 'paypal');
+      return `${actionLabel} executed on gateway ref ${refs.gateway_ref || 'unknown'} with status ${refs.capture_status || 'unknown'} (processor response code ${refs.processor_response_code || 'unknown'}).`;
+    }
     case 'verified':
       return `Outcome ${refs.outcome || 'unknown'} verified for event ${refs.event_id || 'unknown'} under verification ${refs.verification_id || 'unknown'}.`;
     default:

@@ -1,7 +1,8 @@
 import React from 'react';
 import { Link } from 'react-router-dom';
 import type { AuditTrail } from '@/features/audit-trail/api/getAuditTrail';
-import { formatCurrency, formatLabel } from '@/utils/formatters';
+import { formatCurrency, formatLabel, formatActionLabel, isRetryAction } from '@/utils/formatters';
+import { GatewayLink } from '@/components/GatewayLink';
 import { HelpCircle, CheckCircle2, XCircle } from 'lucide-react';
 
 interface Props {
@@ -150,14 +151,24 @@ export const WhyCard: React.FC<Props> = ({ auditTrail, isLoading }) => {
           {exec ? (
             <div className="text-sm space-y-1">
               <p className="font-semibold text-[var(--color-primary)]">
-                {formatLabel(exec.intervention)} · {exec.status}
+                {isRetryAction(exec.intervention)
+                  ? formatActionLabel(exec.intervention, exec.gateway)
+                  : formatLabel(exec.intervention)}{' '}
+                · {exec.status}
               </p>
-              <p className="text-xs text-[var(--color-text-muted)]">Action Type: {exec.action_type}</p>
+              <p className="text-xs text-[var(--color-text-muted)]">
+                Action Type: {formatActionLabel(exec.action_type, exec.gateway)}
+              </p>
               <p className="font-mono text-xs text-[var(--color-primary)]">Gateway Ref: {exec.gateway_ref || 'None'}</p>
               {exec.processor_response_code && (
                 <p className="text-xs text-[var(--color-text-muted)]">
                   Processor Code: <strong>{exec.processor_response_code}</strong>
                 </p>
+              )}
+              {exec.gateway_url && (
+                <div className="pt-1">
+                  <GatewayLink url={exec.gateway_url} gatewayRef={exec.gateway_ref} />
+                </div>
               )}
             </div>
           ) : (

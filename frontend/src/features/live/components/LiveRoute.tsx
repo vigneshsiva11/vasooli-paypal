@@ -20,7 +20,8 @@ import {
   extractDeclineEventId,
 } from '../utils/liveUtils';
 import { WhyCard } from './WhyCard';
-import { formatCurrency, formatLabel } from '@/utils/formatters';
+import { formatCurrency, formatActionLabel } from '@/utils/formatters';
+import { GatewayLink } from '@/components/GatewayLink';
 
 export const LiveRoute: React.FC = () => {
   const [mode, setMode] = useState<'live' | 'replay'>('live');
@@ -359,7 +360,16 @@ export const LiveRoute: React.FC = () => {
                     </span>
                     <div>
                       <div className="flex items-center gap-2">
-                        <p className="text-sm font-bold text-[var(--color-primary)]">{formatLabel(step.name)}</p>
+                        <p className="text-sm font-bold text-[var(--color-primary)]">
+                          {formatActionLabel(
+                            step.name,
+                            step.source && (step.source.toLowerCase().includes('paypal') || step.source.toLowerCase().includes('razorpay'))
+                              ? step.source
+                              : currentRun?.currency === 'INR'
+                              ? 'razorpay'
+                              : 'paypal'
+                          )}
+                        </p>
                         <span
                           className={`rounded px-1.5 py-0.5 text-[10px] font-bold uppercase ${
                             isCompleted
@@ -407,16 +417,34 @@ export const LiveRoute: React.FC = () => {
         </p>
 
         <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3">
-          {evidenceList.map((item) => (
-            <div key={`${item.key}-${item.id}`} className="rounded-lg border border-gray-200 bg-white p-3 shadow-2xs">
-              <span className="text-[10px] font-bold uppercase tracking-wider text-[var(--color-text-muted)]">
-                {item.key} ({item.stepName})
-              </span>
-              <p className="mt-1 font-mono text-xs font-semibold text-[var(--color-primary)] truncate" title={item.id}>
-                {item.id}
-              </p>
-            </div>
-          ))}
+          {evidenceList.map((item) => {
+            const isGatewayUrl =
+              item.key === 'gateway_url' ||
+              (typeof item.id === 'string' &&
+                (item.id.startsWith('http://') || item.id.startsWith('https://')));
+            const stepRef = displayedSteps.find((s) => s.name === item.stepName)?.refs;
+            const gatewayRef =
+              stepRef?.gateway_ref ||
+              stepRef?.order_id ||
+              displayedSteps.find((s) => s.refs?.gateway_ref)?.refs?.gateway_ref;
+
+            return (
+              <div key={`${item.key}-${item.id}`} className="rounded-lg border border-gray-200 bg-white p-3 shadow-2xs">
+                <span className="text-[10px] font-bold uppercase tracking-wider text-[var(--color-text-muted)]">
+                  {item.key} ({item.stepName})
+                </span>
+                {isGatewayUrl ? (
+                  <div className="mt-1">
+                    <GatewayLink url={item.id} gatewayRef={gatewayRef} />
+                  </div>
+                ) : (
+                  <p className="mt-1 font-mono text-xs font-semibold text-[var(--color-primary)] truncate" title={item.id}>
+                    {item.id}
+                  </p>
+                )}
+              </div>
+            );
+          })}
           {evidenceList.length === 0 && (
             <p className="text-xs italic text-[var(--color-text-muted)] col-span-3">No references available.</p>
           )}

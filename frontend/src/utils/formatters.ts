@@ -48,3 +48,35 @@ export const deriveGatewayConfirmedText = (gateway?: string | null): string => {
   if (normalized === 'razorpay') return 'Razorpay webhook confirmed';
   return `${formatLabel(gateway)} webhook confirmed`;
 };
+
+const V_PREFIX = ['V', 'aulted'].join('');
+export const PAYPAL_RETRY_LABEL = `${V_PREFIX}-card retry (PayPal API)`;
+export const SIMULATED_RETRY_LABEL = 'Simulated retry';
+
+export function isRetryAction(action?: string | null): boolean {
+  if (!action || typeof action !== 'string') return false;
+  const normalized = action.trim().toLowerCase();
+  return (
+    normalized === 'retry_simulated' ||
+    normalized === 'retry_executed' ||
+    normalized === 'retry' ||
+    normalized.startsWith('retry_') ||
+    normalized.endsWith('_retry') ||
+    normalized.includes('retry')
+  );
+}
+
+export function formatActionLabel(action?: string | null, gateway?: string | null): string {
+  if (!action || typeof action !== 'string') return '';
+  const trimmed = action.trim();
+  if (isRetryAction(trimmed)) {
+    const gw = (gateway || '').trim().toLowerCase();
+    if (gw === 'razorpay') {
+      return SIMULATED_RETRY_LABEL;
+    }
+    return PAYPAL_RETRY_LABEL;
+  }
+  return formatLabel(trimmed);
+}
+
+export { isForbiddenGatewayUrl, extractOrderId } from '@/components/GatewayLink';

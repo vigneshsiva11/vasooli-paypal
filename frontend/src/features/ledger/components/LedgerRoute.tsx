@@ -7,7 +7,8 @@ import { Download, ShieldCheck, AlertCircle, UserCheck } from 'lucide-react';
 import { appAgGridTheme } from '@/components/AgGridTheme';
 import { useLedgerQuery, type LedgerRow } from '../api/getLedger';
 import { useCurrency } from '@/context/CurrencyContext';
-import { formatCurrency, formatLabel, formatGateway } from '@/utils/formatters';
+import { formatCurrency, formatLabel, formatGateway, formatActionLabel, isRetryAction } from '@/utils/formatters';
+import { GatewayLink } from '@/components/GatewayLink';
 
 ModuleRegistry.registerModules([AllCommunityModule]);
 
@@ -153,7 +154,13 @@ export const LedgerRoute: React.FC = () => {
         width: 160,
         filter: true,
         sortable: true,
-        valueFormatter: (params) => (params.value ? formatLabel(params.value) : 'None'),
+        valueFormatter: (params) => {
+          if (!params.value) return 'None';
+          if (isRetryAction(params.value)) {
+            return formatActionLabel(params.value, params.data?.gateway);
+          }
+          return formatLabel(params.value);
+        },
       },
       {
         field: 'policy_verdict',
@@ -234,9 +241,38 @@ export const LedgerRoute: React.FC = () => {
       {
         field: 'execution_ref',
         headerName: 'Execution Ref',
-        width: 170,
+        width: 220,
         filter: true,
         sortable: true,
+        cellRenderer: (params: any) => {
+          const val = params.value;
+          const url =
+            (params.data as any)?.gateway_url ||
+            (typeof val === 'string' && (val.startsWith('http://') || val.startsWith('https://')) ? val : null);
+          if (url) {
+            return (
+              <GatewayLink
+                url={url}
+                gatewayRef={(params.data as any)?.gateway_ref || (params.data as any)?.execution_ref}
+              />
+            );
+          }
+          if (!val) return <span className="text-gray-400">—</span>;
+          return <span className="font-mono text-xs">{val}</span>;
+        },
+      },
+      {
+        field: 'gateway_url' as any,
+        headerName: 'Gateway Link',
+        width: 240,
+        filter: true,
+        sortable: true,
+        cellRenderer: (params: any) => {
+          const url = params.value || (params.data as any)?.gateway_url;
+          const ref = (params.data as any)?.gateway_ref || (params.data as any)?.execution_ref;
+          if (!url && !ref) return <span className="text-gray-400">—</span>;
+          return <GatewayLink url={url} gatewayRef={ref} />;
+        },
       },
     ],
     [currency]
