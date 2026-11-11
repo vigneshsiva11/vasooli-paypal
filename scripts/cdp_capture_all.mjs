@@ -133,130 +133,152 @@ async function capture(fileName) {
   console.log(`Saved screenshot: ${outPath}`);
 }
 
-try {
-  // 1. /live (replay finished, hero card and step list)
-  console.log('\n--- 1. /live (replay finished, hero card and step list) ---');
-  await navigate('https://vasooli-paypal.onrender.com/live');
-  await waitFor("document.body.innerText.includes('Mission Control')");
-  
-  // Switch to replay mode
-  await evalInPage(`(() => {
-    const btn = Array.from(document.querySelectorAll('button')).find(b => b.textContent.includes('Recorded Replay'));
-    if (btn) btn.click();
-  })()`);
-  await new Promise(r => setTimeout(r, 1500));
-  
-  // Verify hero card and step list
-  const hasMissionControl = await evalInPage("document.body.innerText.includes('Mission Control') && document.body.innerText.includes('Verified by PayPal webhook')");
-  console.log('Mission Control replay ready:', hasMissionControl);
-  await evalInPage('window.scrollTo(0, 0)');
-  await new Promise(r => setTimeout(r, 500));
-  await capture('01-mission-control.png');
+const requestedImages = process.argv.slice(2).map(s => s.trim().toLowerCase());
+const isRequested = (name) => {
+  if (requestedImages.length === 0) return true;
+  return requestedImages.some(req => req === name.toLowerCase() || name.toLowerCase().includes(req));
+};
 
-  // 2. /live Why card
-  console.log('\n--- 2. /live Why card ---');
-  await evalInPage(`(() => {
-    const heading = Array.from(document.querySelectorAll('h2, h3, div')).find(el => el.textContent.includes('Why: Diagnostic & Decision Explanations'));
-    const card = heading?.closest('.rounded-xl') || heading;
-    if (card) {
-      card.scrollIntoView({ block: 'center', behavior: 'instant' });
+try {
+  // 1 & 2: /live (Mission Control & Why Card)
+  if (isRequested('01-mission-control.png') || isRequested('02-why-card.png')) {
+    console.log('\n--- 1 & 2. /live ---');
+    await navigate('https://vasooli-paypal.onrender.com/live');
+    await waitFor("document.body.innerText.includes('Mission Control')");
+    
+    // Switch to replay mode
+    await evalInPage(`(() => {
+      const btn = Array.from(document.querySelectorAll('button')).find(b => b.textContent.includes('Recorded Replay'));
+      if (btn) btn.click();
+    })()`);
+    await new Promise(r => setTimeout(r, 1500));
+    
+    // Verify hero card and step list
+    const hasMissionControl = await evalInPage("document.body.innerText.includes('Mission Control') && document.body.innerText.includes('Verified by PayPal webhook')");
+    console.log('Mission Control replay ready:', hasMissionControl);
+
+    if (isRequested('01-mission-control.png')) {
+      await evalInPage('window.scrollTo(0, 0)');
+      await new Promise(r => setTimeout(r, 500));
+      await capture('01-mission-control.png');
     }
-  })()`);
-  await new Promise(r => setTimeout(r, 600));
-  await capture('02-why-card.png');
+
+    if (isRequested('02-why-card.png')) {
+      console.log('\n--- 2. /live Why card ---');
+      await evalInPage(`(() => {
+        const heading = Array.from(document.querySelectorAll('h2, h3, div')).find(el => el.textContent.includes('Why: Diagnostic & Decision Explanations'));
+        const card = heading?.closest('.rounded-xl') || heading;
+        if (card) {
+          card.scrollIntoView({ block: 'center', behavior: 'instant' });
+        }
+      })()`);
+      await new Promise(r => setTimeout(r, 600));
+      await capture('02-why-card.png');
+    }
+  }
 
   // 3. /rules after clicking conservative example and previewing
-  console.log('\n--- 3. /rules (conservative example + preview) ---');
-  await navigate('https://vasooli-paypal.onrender.com/rules');
-  await waitFor("document.body.innerText.includes('Plain-English Rule Proposal')");
-  
-  // Click Conservative chip
-  await evalInPage(`(() => {
-    const chip = Array.from(document.querySelectorAll('button')).find(b => b.textContent.includes('Conservative'));
-    if (chip) chip.click();
-  })()`);
-  await new Promise(r => setTimeout(r, 600));
+  if (isRequested('03-rules.png')) {
+    console.log('\n--- 3. /rules (conservative example + preview) ---');
+    await navigate('https://vasooli-paypal.onrender.com/rules');
+    await waitFor("document.body.innerText.includes('Plain-English Rule Proposal')");
+    
+    // Click Conservative chip
+    await evalInPage(`(() => {
+      const chip = Array.from(document.querySelectorAll('button')).find(b => b.textContent.includes('Conservative'));
+      if (chip) chip.click();
+    })()`);
+    await new Promise(r => setTimeout(r, 600));
 
-  // Click Preview Proposal
-  await evalInPage(`(() => {
-    const btn = Array.from(document.querySelectorAll('button')).find(b => b.textContent.includes('Preview Proposal'));
-    if (btn) btn.click();
-  })()`);
-  
-  // Wait for preview results
-  await waitFor("document.body.innerText.includes('Safety bounds') || document.body.innerText.includes('Diff vs active rulebook') || document.body.innerText.includes('Proposal')");
-  await new Promise(r => setTimeout(r, 1000));
-  await evalInPage(`(() => {
-    const preview = Array.from(document.querySelectorAll('h2, h3')).find(el => el.textContent.includes('Preview') || el.textContent.includes('Impact'));
-    if (preview) {
-      preview.closest('section')?.scrollIntoView({ block: 'start', behavior: 'instant' });
-    }
-  })()`);
-  await new Promise(r => setTimeout(r, 500));
-  await capture('03-rules.png');
+    // Click Preview Proposal
+    await evalInPage(`(() => {
+      const btn = Array.from(document.querySelectorAll('button')).find(b => b.textContent.includes('Preview Proposal'));
+      if (btn) btn.click();
+    })()`);
+    
+    // Wait for preview results
+    await waitFor("document.body.innerText.includes('Safety bounds') || document.body.innerText.includes('Diff vs active rulebook') || document.body.innerText.includes('Proposal')");
+    await new Promise(r => setTimeout(r, 1000));
+    await evalInPage(`(() => {
+      const preview = Array.from(document.querySelectorAll('h2, h3')).find(el => el.textContent.includes('Preview') || el.textContent.includes('Impact'));
+      if (preview) {
+        preview.closest('section')?.scrollIntoView({ block: 'start', behavior: 'instant' });
+      }
+    })()`);
+    await new Promise(r => setTimeout(r, 500));
+    await capture('03-rules.png');
+  }
 
   // 4. /agent after running three scenarios
-  console.log('\n--- 4. /agent (three scenarios) ---');
-  await navigate('https://vasooli-paypal.onrender.com/agent');
-  await waitFor("document.body.innerText.includes('Try to break it')");
-  
-  // Wait for scenarios to load
-  await waitFor("document.querySelectorAll('button').length > 5");
-  await new Promise(r => setTimeout(r, 1000));
+  if (isRequested('04-agent.png')) {
+    console.log('\n--- 4. /agent (three scenarios) ---');
+    await navigate('https://vasooli-paypal.onrender.com/agent');
+    await waitFor("document.body.innerText.includes('Try to break it')");
+    
+    // Wait for scenarios to load
+    await waitFor("document.querySelectorAll('button').length > 5");
+    await new Promise(r => setTimeout(r, 1000));
 
-  // Run Scenario 1
-  console.log('Running scenario 1...');
-  await evalInPage(`(() => {
-    const btns = Array.from(document.querySelectorAll('button')).filter(b => b.querySelector('.group-hover\\\\:text-indigo-600') || b.textContent.includes('Bypass') || b.textContent.includes('Scenario') || b.className.includes('group relative'));
-    if (btns[0]) btns[0].click();
-  })()`);
-  await new Promise(r => setTimeout(r, 2000));
+    // Run Scenario 1
+    console.log('Running scenario 1...');
+    await evalInPage(`(() => {
+      const btns = Array.from(document.querySelectorAll('button')).filter(b => b.querySelector('.group-hover\\\\:text-indigo-600') || b.textContent.includes('Bypass') || b.textContent.includes('Scenario') || b.className.includes('group relative'));
+      if (btns[0]) btns[0].click();
+    })()`);
+    await new Promise(r => setTimeout(r, 2000));
 
-  // Run Scenario 2
-  console.log('Running scenario 2...');
-  await evalInPage(`(() => {
-    const btns = Array.from(document.querySelectorAll('button')).filter(b => b.querySelector('.group-hover\\\\:text-indigo-600') || b.textContent.includes('Bypass') || b.textContent.includes('Scenario') || b.className.includes('group relative'));
-    if (btns[1]) btns[1].click();
-  })()`);
-  await new Promise(r => setTimeout(r, 2000));
+    // Run Scenario 2
+    console.log('Running scenario 2...');
+    await evalInPage(`(() => {
+      const btns = Array.from(document.querySelectorAll('button')).filter(b => b.querySelector('.group-hover\\\\:text-indigo-600') || b.textContent.includes('Bypass') || b.textContent.includes('Scenario') || b.className.includes('group relative'));
+      if (btns[1]) btns[1].click();
+    })()`);
+    await new Promise(r => setTimeout(r, 2000));
 
-  // Run Scenario 3
-  console.log('Running scenario 3...');
-  await evalInPage(`(() => {
-    const btns = Array.from(document.querySelectorAll('button')).filter(b => b.querySelector('.group-hover\\\\:text-indigo-600') || b.textContent.includes('Bypass') || b.textContent.includes('Scenario') || b.className.includes('group relative'));
-    if (btns[2]) btns[2].click();
-  })()`);
-  await new Promise(r => setTimeout(r, 2500));
+    // Run Scenario 3
+    console.log('Running scenario 3...');
+    await evalInPage(`(() => {
+      const btns = Array.from(document.querySelectorAll('button')).filter(b => b.querySelector('.group-hover\\\\:text-indigo-600') || b.textContent.includes('Bypass') || b.textContent.includes('Scenario') || b.className.includes('group relative'));
+      if (btns[2]) btns[2].click();
+    })()`);
+    await new Promise(r => setTimeout(r, 2500));
 
-  await evalInPage('window.scrollTo(0, 150)');
-  await new Promise(r => setTimeout(r, 500));
-  await capture('04-agent.png');
+    await evalInPage('window.scrollTo(0, 150)');
+    await new Promise(r => setTimeout(r, 500));
+    await capture('04-agent.png');
+  }
 
   // 5. /ledger
-  console.log('\n--- 5. /ledger ---');
-  await navigate('https://vasooli-paypal.onrender.com/ledger');
-  await waitFor("document.body.innerText.includes('Audit Ledger') || document.body.innerText.includes('Ledger')");
-  await new Promise(r => setTimeout(r, 1500));
-  await evalInPage('window.scrollTo(0, 0)');
-  await capture('05-ledger.png');
+  if (isRequested('05-ledger.png')) {
+    console.log('\n--- 5. /ledger ---');
+    await navigate('https://vasooli-paypal.onrender.com/ledger');
+    await waitFor("document.body.innerText.includes('Audit Ledger') || document.body.innerText.includes('Ledger')");
+    await new Promise(r => setTimeout(r, 1500));
+    await evalInPage('window.scrollTo(0, 0)');
+    await capture('05-ledger.png');
+  }
 
   // 6. /audit-trail (the newest event)
-  console.log('\n--- 6. /audit-trail ---');
-  await navigate('https://vasooli-paypal.onrender.com/audit-trail');
-  await waitFor("document.body.innerText.includes('Audit Trail') || document.body.innerText.includes('Diagnosis')");
-  await new Promise(r => setTimeout(r, 1500));
-  await evalInPage('window.scrollTo(0, 0)');
-  await capture('06-audit-trail.png');
+  if (isRequested('06-audit-trail.png')) {
+    console.log('\n--- 6. /audit-trail ---');
+    await navigate('https://vasooli-paypal.onrender.com/audit-trail');
+    await waitFor("document.body.innerText.includes('Audit Trail') || document.body.innerText.includes('Diagnosis')");
+    await new Promise(r => setTimeout(r, 1500));
+    await evalInPage('window.scrollTo(0, 0)');
+    await capture('06-audit-trail.png');
+  }
 
   // 7. /studio (data loaded)
-  console.log('\n--- 7. /studio ---');
-  await navigate('https://vasooli-paypal.onrender.com/studio');
-  await waitFor("document.body.innerText.includes('Studio') || document.body.innerText.includes('Assistant')");
-  await new Promise(r => setTimeout(r, 2000));
-  await evalInPage('window.scrollTo(0, 0)');
-  await capture('07-studio.png');
+  if (isRequested('07-studio.png')) {
+    console.log('\n--- 7. /studio ---');
+    await navigate('https://vasooli-paypal.onrender.com/studio');
+    await waitFor("document.body.innerText.includes('Studio') || document.body.innerText.includes('Assistant')");
+    await new Promise(r => setTimeout(r, 2000));
+    await evalInPage('window.scrollTo(0, 0)');
+    await capture('07-studio.png');
+  }
 
-  console.log('\nAll 7 screenshots captured successfully!');
+  console.log('\nCapture completed successfully!');
 } catch (err) {
   console.error('Error during screenshot capture:', err);
 } finally {
