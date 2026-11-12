@@ -9,6 +9,22 @@
 
 > Everything here runs against the **PayPal sandbox**. No real money moves.
 
+## Who it is for and why it matters
+
+**Who:** online merchants and subscription businesses that charge cards on file through PayPal, and small businesses that invoice through PayPal. The person who feels the problem is the owner or finance lead who wants recovery automated but must be able to answer "why did the agent do that, and can I stop it?"
+
+**The problem:** when a renewal card declines, recovery usually means blind retries and nagging emails. Handing that job to an AI agent is tempting but risky: it touches money, and a wrong retry or an over-eager contact costs customers. Vasooli shows a recovery that is automatic, bounded by rules the merchant wrote, and proven by PayPal's own signed events. The demo recovers a declined payment end to end, with the matching transaction visible in the PayPal sandbox.
+
+## How this maps to the judging criteria
+
+| Criterion | Where to see it |
+|---|---|
+| **Technological implementation** | Real PayPal sandbox calls (Orders v2, vault, invoicing), signed-webhook verification, a reconciler that classifies PayPal-collected versus recorded payments, an orchestrator with a simulated clock, Gemini used for rule compilation under validation, an MCP server, and hundreds of automated checks including real-database tests. See [docs/architecture.md](docs/architecture.md). |
+| **Design** | One coherent product: Mission Control, Rules, Ledger, Audit Trail, Studio, and Try to break it share one design system, honest labels, and a replay mode that works with no backend. |
+| **Potential impact** | A specific problem (recovering declined payments) for a specific audience (PayPal merchants), demonstrated with a real recovered payment rather than a mock-up. |
+| **Innovation** | The model proposes and deterministic code disposes; verified and asserted money never blend; every decision is re-derivable from a fingerprinted rulebook; outside agents are tested against scripted attacks. |
+| **Presentation** | The video shows the whole flow working: rules, a real decline, retry, signed webhook, then the attack scene. |
+
 ## The idea in three acts
 
 | Act | What you see | Where |
@@ -34,18 +50,6 @@ Sandbox webhooks take about a minute each, so a live run takes several minutes. 
 3. **Try to break it** (`/agent`): click each scenario and watch the audit feed.
 4. **Ledger** (`/ledger`): Verified versus Asserted badges; the "Needs approval" filter shows verdicts that route to a human.
 5. **Studio** (`/studio`): an AG Studio dashboard over the sanitized ledger, with a read-only assistant that answers only from ledger queries.
-
-## Screenshots
-
-| View | Screenshot |
-|---|---|
-| **Mission Control (`/live`)**<br/>Replay finished with verified PayPal webhook and recovery steps | ![Mission Control](docs/screenshots/01-mission-control.png) |
-| **Why Card (`/live`)**<br/>Diagnostic & decision explanations with policy verification | ![Why Card](docs/screenshots/02-why-card.png) |
-| **Rules Configuration (`/rules`)**<br/>Plain-English proposals, deterministic caps, diff & fingerprint | ![Rules & Policy](docs/screenshots/03-rules.png) |
-| **Adversarial Testing (`/agent`)**<br/>Seven attack scenarios blocked by deterministic guardrails | ![Try to break it](docs/screenshots/04-agent.png) |
-| **Ledger (`/ledger`)**<br/>Verified vs Asserted badges and recovery status audit | ![Ledger](docs/screenshots/05-ledger.png) |
-| **Audit Trail (`/audit-trail`)**<br/>Full timeline and state history for the latest recovery event | ![Audit Trail](docs/screenshots/06-audit-trail.png) |
-| **Studio (`/studio`)**<br/>AG Studio KPI cards, root cause chart, and read-only assistant | ![Studio](docs/screenshots/07-studio.png) |
 
 ## How it works
 
