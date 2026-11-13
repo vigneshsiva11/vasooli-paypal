@@ -3,8 +3,7 @@
 **Autonomy you can audit.** Vasooli recovers failed payments on PayPal, but it never acts on its own say-so: every action passes a deterministic policy layer, every recovery is confirmed by a signed PayPal webhook, and every decision can be re-derived later from a fingerprinted rulebook.
 
 - **Live demo:** https://vasooli-paypal.onrender.com (sandbox, no login)
-- **Video (under 3 min):** `<YOUTUBE URL>`
-- **Devpost:** `<DEVPOST URL>`
+- **Video:** https://youtu.be/1Ono5TKrFFU  
 - **What changed since the first version:** [WHAT_CHANGED.md](WHAT_CHANGED.md)
 
 > Everything here runs against the **PayPal sandbox**. No real money moves.
